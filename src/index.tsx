@@ -1585,6 +1585,268 @@ app.post('/api/temperature/update/:clientId', async (c) => {
 });
 
 // ============================================
+// 风险/机会自动识别系统 API
+// ============================================
+
+// 评估单个客户的风险和机会
+async function assessClientRiskOpportunity(DB: D1Database, clientId: number) {
+  const client = await DB.prepare(`
+    SELECT 
+      c.*,
+      COUNT(DISTINCT cl.id) as interaction_count,
+      MAX(cl.created_at) as last_interaction,
+      SUM(CASE WHEN cl.sentiment = 'positive' THEN 1 ELSE 0 END) as positive_count,
+      SUM(CASE WHEN cl.sentiment = 'negative' THEN 1 ELSE 0 END) as negative_count
+    FROM clients c
+    LEFT JOIN client_logs cl ON c.id = cl.client_id 
+      AND cl.log_type = 'interaction'
+      AND julianday('now') - julianday(cl.created_at) <= 30
+    WHERE c.id = ?
+    GROUP BY c.id
+  `).bind(clientId).first();
+  
+  if (!client) return null;
+  
+  let isHighOpportunity = false;
+  let isHighRisk = false;
+  let riskReasons: string[] = [];
+  let opportunityReasons: string[] = [];
+  
+  // === 高机会识别 ===
+  
+  // 1. 温度高于80分
+  if (client.temperature_score >= 80) {
+    isHighOpportunity = true;
+    opportunityReasons.push('温度评分高达 ' + client.temperature_score + ' 分');
+  }
+  
+  // 2. 高意向阶段
+  if (['high_intent', 'joined_group', 'opened_account'].includes(client.stage as string)) {
+    isHighOpportunity = true;
+    opportunityReasons.push('处于高转化阶段');
+  }
+  
+  // 3. 近7天内互动频繁（≥5次）
+  const recentInteractions = await DB.prepare(`
+    SELECT COUNT(*) as count
+    FROM client_logs
+    WHERE client_id = ? 
+      AND log_type = 'interaction'
+      AND julianday('now') - julianday(created_at) <= 7
+  `).bind(clientId).first();
+  
+  if ((recentInteractions?.count as number || 0) >= 5) {
+    isHighOpportunity = true;
+    opportunityReasons.push('近7天互动 ' + recentInteractions?.count + ' 次');
+  }
+  
+  // 4. 正向情绪占比高（>80%）
+  const totalSentiment = (client.positive_count || 0) + (client.negative_count || 0);
+  if (totalSentiment > 0 && (client.positive_count || 0) / totalSentiment > 0.8) {
+    isHighOpportunity = true;
+    opportunityReasons.push('正向情绪占比 ' + Math.round((client.positive_count as number / totalSentiment) * 100) + '%');
+  }
+  
+  // === 高风险识别 ===
+  
+  // 1. 温度低于40分
+  if (client.temperature_score < 40) {
+    isHighRisk = true;
+    riskReasons.push('温度评分仅 ' + client.temperature_score + ' 分');
+  }
+  
+  // 2. 48小时未互动
+  if (client.last_interaction) {
+    const hoursSince = (new Date().getTime() - new Date(client.last_interaction as string).getTime()) / (1000 * 3600);
+    if (hoursSince >= 48) {
+      isHighRisk = true;
+      riskReasons.push(Math.round(hoursSince) + ' 小时未互动');
+    }
+  }
+  
+  // 3. 阶段停滞超过7天
+  const stageHistory = await DB.prepare(`
+    SELECT created_at 
+    FROM client_stages
+    WHERE client_id = ? AND to_stage = ?
+    ORDER BY created_at DESC LIMIT 1
+  `).bind(clientId, client.stage).first();
+  
+  if (stageHistory) {
+    const daysSinceStageChange = 
+      (new Date().getTime() - new Date(stageHistory.created_at as string).getTime()) / (1000 * 3600 * 24);
+    if (daysSinceStageChange > 7) {
+      isHighRisk = true;
+      riskReasons.push('当前阶段停滞 ' + Math.round(daysSinceStageChange) + ' 天');
+    }
+  }
+  
+  // 4. 负向情绪占比高（>50%）
+  if (totalSentiment > 0 && (client.negative_count || 0) / totalSentiment > 0.5) {
+    isHighRisk = true;
+    riskReasons.push('负向情绪占比 ' + Math.round((client.negative_count as number / totalSentiment) * 100) + '%');
+  }
+  
+  // 5. 互动频率下降（近7天 vs 前7天）
+  const recentCount = await DB.prepare(`
+    SELECT COUNT(*) as count FROM client_logs
+    WHERE client_id = ? AND log_type = 'interaction'
+      AND julianday('now') - julianday(created_at) <= 7
+  `).bind(clientId).first();
+  
+  const previousCount = await DB.prepare(`
+    SELECT COUNT(*) as count FROM client_logs
+    WHERE client_id = ? AND log_type = 'interaction'
+      AND julianday('now') - julianday(created_at) > 7
+      AND julianday('now') - julianday(created_at) <= 14
+  `).bind(clientId).first();
+  
+  const recentNum = recentCount?.count as number || 0;
+  const previousNum = previousCount?.count as number || 0;
+  
+  if (previousNum > 0 && recentNum < previousNum * 0.5) {
+    isHighRisk = true;
+    riskReasons.push('互动频率下降 ' + Math.round((1 - recentNum / previousNum) * 100) + '%');
+  }
+  
+  return {
+    isHighOpportunity,
+    isHighRisk,
+    opportunityReasons,
+    riskReasons,
+    riskNotes: riskReasons.join('；')
+  };
+}
+
+// 批量评估所有客户
+app.post('/api/risk-opportunity/assess-all', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  const clients = await DB.prepare(`
+    SELECT id FROM clients 
+    WHERE user_id = ? AND is_archived = 0
+  `).bind(userId).all();
+  
+  let opportunityCount = 0;
+  let riskCount = 0;
+  const results = [];
+  
+  for (const client of clients.results || []) {
+    const assessment = await assessClientRiskOpportunity(DB, client.id as number);
+    if (assessment) {
+      await DB.prepare(`
+        UPDATE clients 
+        SET is_high_opportunity = ?,
+            is_high_risk = ?,
+            risk_notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(
+        assessment.isHighOpportunity ? 1 : 0,
+        assessment.isHighRisk ? 1 : 0,
+        assessment.riskNotes,
+        client.id
+      ).run();
+      
+      if (assessment.isHighOpportunity) opportunityCount++;
+      if (assessment.isHighRisk) riskCount++;
+      
+      // 如果是高风险，创建提醒
+      if (assessment.isHighRisk) {
+        const clientData = await DB.prepare('SELECT name FROM clients WHERE id = ?').bind(client.id).first();
+        const message = `客户「${clientData?.name}」被标记为高风险：${assessment.riskNotes}`;
+        
+        // 检查今天是否已有同类提醒
+        const existing = await DB.prepare(`
+          SELECT id FROM system_alerts
+          WHERE user_id = ? AND client_id = ?
+            AND alert_type = 'high_risk'
+            AND DATE(created_at) = DATE('now')
+        `).bind(userId, client.id).first();
+        
+        if (!existing) {
+          await DB.prepare(`
+            INSERT INTO system_alerts (user_id, client_id, alert_type, priority, message)
+            VALUES (?, ?, 'high_risk', 'high', ?)
+          `).bind(userId, client.id, message).run();
+        }
+      }
+      
+      // 如果是高机会，创建提醒
+      if (assessment.isHighOpportunity) {
+        const clientData = await DB.prepare('SELECT name FROM clients WHERE id = ?').bind(client.id).first();
+        const message = `客户「${clientData?.name}」被标记为高机会：${assessment.opportunityReasons.join('；')}`;
+        
+        const existing = await DB.prepare(`
+          SELECT id FROM system_alerts
+          WHERE user_id = ? AND client_id = ?
+            AND alert_type = 'high_opportunity'
+            AND DATE(created_at) = DATE('now')
+        `).bind(userId, client.id).first();
+        
+        if (!existing) {
+          await DB.prepare(`
+            INSERT INTO system_alerts (user_id, client_id, alert_type, priority, message)
+            VALUES (?, ?, 'high_opportunity', 'high', ?)
+          `).bind(userId, client.id, message).run();
+        }
+      }
+      
+      results.push({
+        clientId: client.id,
+        isHighOpportunity: assessment.isHighOpportunity,
+        isHighRisk: assessment.isHighRisk
+      });
+    }
+  }
+  
+  return c.json({
+    success: true,
+    total: clients.results?.length || 0,
+    opportunityCount,
+    riskCount,
+    results
+  });
+});
+
+// 评估单个客户
+app.post('/api/risk-opportunity/assess/:clientId', async (c) => {
+  const { DB } = c.env;
+  const clientId = parseInt(c.req.param('clientId'));
+  
+  const assessment = await assessClientRiskOpportunity(DB, clientId);
+  
+  if (!assessment) {
+    return c.json({ success: false, error: '客户不存在' }, 404);
+  }
+  
+  await DB.prepare(`
+    UPDATE clients 
+    SET is_high_opportunity = ?,
+        is_high_risk = ?,
+        risk_notes = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    assessment.isHighOpportunity ? 1 : 0,
+    assessment.isHighRisk ? 1 : 0,
+    assessment.riskNotes,
+    clientId
+  ).run();
+  
+  return c.json({
+    success: true,
+    clientId,
+    assessment
+  });
+});
+
+// ============================================
 // 登录/注册页面
 // ============================================
 app.get('/login', (c) => {
@@ -2210,6 +2472,13 @@ app.get('/', (c) => {
             <p class="text-gray-600 mt-1">实时业绩概览</p>
           </div>
           <div class="flex space-x-3">
+            <button 
+              onclick="assessAllRiskOpportunity()" 
+              class="px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition font-medium"
+              title="智能识别高价值客户和流失风险"
+            >
+              <i class="fas fa-brain mr-2"></i>智能评估
+            </button>
             <button 
               onclick="updateAllTemperatures()" 
               class="px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-medium"
@@ -4966,6 +5235,117 @@ app.get('/', (c) => {
     
     // 启动定时任务
     scheduleTemperatureUpdate();
+
+    // ============================================
+    // 风险/机会自动识别功能
+    // ============================================
+    
+    // 批量评估所有客户
+    async function assessAllRiskOpportunity() {
+      if (!confirm('确定要重新评估所有客户的风险和机会吗？这可能需要一些时间。')) {
+        return;
+      }
+      
+      try {
+        const res = await axios.post(\`/api/risk-opportunity/assess-all?user_id=\${currentUser.id}\`);
+        
+        if (res.data.success) {
+          const message = \`
+评估完成！
+
+总计：\${res.data.total} 个客户
+━━━━━━━━━━━━━━━━━━━━━
+⭐ 高机会客户：\${res.data.opportunityCount} 个
+⚠️  高风险客户：\${res.data.riskCount} 个
+
+高机会识别条件：
+- 温度评分 ≥ 80分
+- 处于高转化阶段
+- 近7天互动 ≥ 5次
+- 正向情绪占比 > 80%
+
+高风险识别条件：
+- 温度评分 < 40分
+- 48小时未互动
+- 阶段停滞 > 7天
+- 负向情绪占比 > 50%
+- 互动频率下降 > 50%
+          \`;
+          
+          alert(message);
+          
+          // 刷新当前视图
+          showView('dashboard');
+        } else {
+          alert('评估失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('评估失败：' + error.message);
+      }
+    }
+    
+    // 评估单个客户
+    async function assessClientRiskOpportunity(clientId) {
+      try {
+        const res = await axios.post(\`/api/risk-opportunity/assess/\${clientId}\`);
+        
+        if (res.data.success) {
+          const assessment = res.data.assessment;
+          
+          let message = '客户风险/机会评估完成！\\n\\n';
+          
+          if (assessment.isHighOpportunity) {
+            message += '⭐ 高机会客户\\n';
+            message += '原因：\\n';
+            assessment.opportunityReasons.forEach(reason => {
+              message += \`  • \${reason}\\n\`;
+            });
+            message += '\\n';
+          }
+          
+          if (assessment.isHighRisk) {
+            message += '⚠️ 高风险客户\\n';
+            message += '原因：\\n';
+            assessment.riskReasons.forEach(reason => {
+              message += \`  • \${reason}\\n\`;
+            });
+          }
+          
+          if (!assessment.isHighOpportunity && !assessment.isHighRisk) {
+            message += '✅ 正常客户（无特殊风险或机会）';
+          }
+          
+          alert(message);
+          
+          // 刷新客户详情
+          showClientDetail(clientId);
+        } else {
+          alert('评估失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('评估失败：' + error.message);
+      }
+    }
+    
+    // 每日自动评估（每天凌晨3点）
+    function scheduleRiskOpportunityAssessment() {
+      const now = new Date();
+      const night = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        3, 0, 0, 0
+      );
+      const msToMidnight = night.getTime() - now.getTime();
+      
+      setTimeout(() => {
+        assessAllRiskOpportunity();
+        setInterval(assessAllRiskOpportunity, 24 * 60 * 60 * 1000);
+      }, msToMidnight);
+    }
+    
+    // 启动定时任务
+    scheduleRiskOpportunityAssessment();
 
     // 启动应用
     initApp();
