@@ -2066,6 +2066,97 @@ app.get('/', (c) => {
     .temp-warm { border-left: 4px solid #F59E0B; }
     .temp-neutral { border-left: 4px solid #3B82F6; }
     .temp-cold { border-left: 4px solid #6B7280; }
+    
+    /* 移动端响应式优化 */
+    @media (max-width: 768px) {
+      /* 导航栏移动端优化 */
+      nav h1 { font-size: 1.25rem !important; }
+      nav h1 i { display: none; }
+      nav .flex.items-center.space-x-4 { 
+        flex-wrap: wrap; 
+        gap: 0.25rem;
+      }
+      nav button { 
+        padding: 0.5rem 0.75rem !important; 
+        font-size: 0.875rem;
+      }
+      nav button span { display: none; }
+      nav button i { margin: 0 !important; }
+      
+      /* 看板列优化 */
+      .stage-column { 
+        min-width: 240px !important; 
+        max-width: 280px !important; 
+      }
+      
+      /* 卡片优化 */
+      .client-card { padding: 0.75rem !important; }
+      .client-card h3 { font-size: 0.9rem; }
+      
+      /* 搜索和筛选优化 */
+      #searchInput { 
+        width: 100% !important; 
+        max-width: 200px;
+      }
+      
+      /* 按钮组优化 */
+      .flex.space-x-3 { 
+        flex-wrap: wrap; 
+        gap: 0.5rem; 
+      }
+      
+      /* Dashboard KPI卡片优化 */
+      .grid.grid-cols-1.md\\:grid-cols-4 { 
+        grid-template-columns: repeat(2, 1fr) !important; 
+      }
+      
+      /* 表格优化 */
+      table { 
+        font-size: 0.875rem; 
+        display: block;
+        overflow-x: auto;
+      }
+      
+      /* Modal优化 */
+      .max-w-4xl, .max-w-6xl { 
+        max-width: 95vw !important; 
+        margin: 0.5rem !important;
+      }
+      
+      /* 提醒面板优化 */
+      #alertsPanel { 
+        right: 0.5rem !important; 
+        left: 0.5rem !important; 
+        width: auto !important; 
+      }
+      
+      /* Toast优化 */
+      .fixed.bottom-8.right-8 { 
+        bottom: 1rem !important; 
+        right: 1rem !important; 
+        left: 1rem !important; 
+        width: auto !important;
+      }
+    }
+    
+    @media (max-width: 480px) {
+      /* 超小屏幕优化 */
+      nav { padding: 0.5rem !important; }
+      .max-w-7xl { padding: 0.5rem !important; }
+      
+      .stage-column { 
+        min-width: 200px !important; 
+        max-width: 240px !important; 
+      }
+      
+      /* Dashboard单列显示 */
+      .grid.grid-cols-1.md\\:grid-cols-4 { 
+        grid-template-columns: 1fr !important; 
+      }
+      
+      /* 隐藏部分次要信息 */
+      .text-xs.text-gray-500 { display: none; }
+    }
   </style>
 </head>
 <body class="bg-gray-50">
