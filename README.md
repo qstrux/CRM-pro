@@ -206,9 +206,9 @@ npm run db:console:local    # 打开 SQL 控制台
 https://3000-ihq45sgs2pt3az2hus31k-a402f90a.sandbox.novita.ai
 ```
 
-### 生产环境（待部署）
+### 生产环境
 ```
-待部署到 Cloudflare Pages
+https://c98d3736.crm-high-trust-sales.pages.dev
 ```
 
 ---
@@ -237,11 +237,14 @@ https://3000-ihq45sgs2pt3az2hus31k-a402f90a.sandbox.novita.ai
 - [x] 互动日志 Timeline
 - [x] 标签系统（基础）
 
-### MVP v0.2（开发中） 🔄
-- [ ] 用户认证系统（JWT）
-- [ ] 每日战报录入
-- [ ] 话术智库管理
-- [ ] 团队管理页面
+### MVP v0.2（已完成） ✅
+- [x] 用户认证系统（JWT）
+- [x] 每日战报录入
+- [x] 话术智库管理
+- [x] 团队管理页面
+- [x] 批量数据导入（CSV/Excel/快速录入）
+- [x] 生产环境部署（Cloudflare Pages）
+- [x] GitHub 代码托管
 
 ### V1.0（规划中） 📅
 - [ ] 自动提醒系统（48小时未互动）
@@ -352,14 +355,28 @@ npm run deploy:prod     # 生产环境部署
 
 ## 📝 更新日志
 
-### v0.1.0 (2025-11-19)
+### v0.2.0 (2025-11-19)
+**新增功能：**
+- ✨ 用户认证系统（登录/注册/JWT）
+- ✨ 每日战报系统（7阶段数据录入+历史查看）
+- ✨ 话术智库系统（6大分类+成功案例）
+- ✨ 团队管理系统（成员列表+KPI+排行榜）
+- ✨ 批量数据导入（CSV上传/Excel粘贴/快速录入）
+
+**技术改进：**
+- 🚀 生产环境部署（Cloudflare Pages）
+- 🔧 GitHub 代码托管集成
+- 🔧 完整 32 个 API 接口
+- 🔧 20 次 Git 提交记录
+
+### v0.1.0 (2025-11-18)
 **新增功能：**
 - ✨ 初始化项目结构
 - ✨ 完整数据库 Schema（9 张表）
 - ✨ 客户看板（7 阶段）
 - ✨ 客户详情页（左侧画像 + 右侧日志）
 - ✨ Dashboard 仪表盘（KPI + 漏斗）
-- ✨ 完整 API 接口（CRUD + 统计）
+- ✨ 基础 CRUD API 接口
 - ✨ 测试数据自动初始化
 
 **技术改进：**
@@ -380,7 +397,7 @@ MIT License - 自由使用和修改
 **Qstrux**
 - 金融科技创业者 & 投资顾问
 - 专注于 AI 驱动的财富管理解决方案
-- GitHub: [项目链接待添加]
+- GitHub: https://github.com/qstrux/CRM-pro
 
 ---
 
