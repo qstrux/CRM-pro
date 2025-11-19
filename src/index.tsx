@@ -268,6 +268,20 @@ app.post('/api/tags', async (c) => {
   return c.json({ success: true, tagId: result.meta.last_row_id });
 });
 
+// 删除标签
+app.delete('/api/tags/:id', async (c) => {
+  const { DB } = c.env;
+  const tagId = c.req.param('id');
+  
+  // 先删除关联关系
+  await DB.prepare('DELETE FROM client_tags WHERE tag_id = ?').bind(tagId).run();
+  
+  // 再删除标签
+  await DB.prepare('DELETE FROM tags WHERE id = ?').bind(tagId).run();
+  
+  return c.json({ success: true });
+});
+
 // 为客户添加标签
 app.post('/api/clients/:id/tags', async (c) => {
   const { DB } = c.env;
@@ -383,13 +397,16 @@ app.get('/', (c) => {
           </h1>
         </div>
         <div class="flex items-center space-x-4">
-          <button onclick="showView('dashboard')" class="px-4 py-2 text-gray-700 hover:text-blue-600">
+          <button onclick="showView('dashboard')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-chart-line mr-2"></i>仪表盘
           </button>
-          <button onclick="showView('kanban')" class="px-4 py-2 text-gray-700 hover:text-blue-600">
+          <button onclick="showView('kanban')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-columns mr-2"></i>客户看板
           </button>
-          <button onclick="showNewClientModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <button onclick="showTagsManagement()" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
+            <i class="fas fa-tags mr-2"></i>标签管理
+          </button>
+          <button onclick="showNewClientModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
             <i class="fas fa-plus mr-2"></i>新增客户
           </button>
         </div>
@@ -442,6 +459,73 @@ app.get('/', (c) => {
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- 标签管理模态框 -->
+  <div id="tagsManagementModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-2xl font-bold">标签管理</h2>
+        <button onclick="hideTagsManagement()" class="text-gray-500 hover:text-gray-700">
+          <i class="fas fa-times text-2xl"></i>
+        </button>
+      </div>
+
+      <!-- 新建标签表单 -->
+      <div class="bg-gray-50 rounded-lg p-4 mb-6">
+        <h3 class="font-semibold text-gray-900 mb-4">新建标签</h3>
+        <form id="newTagForm" class="flex space-x-3">
+          <input 
+            type="text" 
+            name="name" 
+            placeholder="标签名称" 
+            required 
+            class="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+          >
+          <input 
+            type="color" 
+            name="color" 
+            value="#3B82F6" 
+            class="w-16 h-10 border rounded-lg cursor-pointer"
+          >
+          <select 
+            name="category" 
+            class="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="client_trait">客户特征</option>
+            <option value="interest">兴趣点</option>
+            <option value="risk">风险</option>
+            <option value="opportunity">机会</option>
+          </select>
+          <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+            <i class="fas fa-plus mr-2"></i>创建
+          </button>
+        </form>
+      </div>
+
+      <!-- 标签列表 -->
+      <div id="tagsListContainer">
+        <div class="text-center py-8 text-gray-500">
+          <i class="fas fa-spinner fa-spin text-2xl mb-2"></i>
+          <p>加载中...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 为客户添加标签模态框 -->
+  <div id="addTagToClientModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-8 max-w-md w-full">
+      <h2 class="text-2xl font-bold mb-6">为客户添加标签</h2>
+      <div id="availableTagsList" class="space-y-2 max-h-96 overflow-y-auto">
+        <!-- 动态加载标签列表 -->
+      </div>
+      <div class="mt-6">
+        <button onclick="hideAddTagToClientModal()" class="w-full bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400">
+          关闭
+        </button>
+      </div>
     </div>
   </div>
 
@@ -983,9 +1067,125 @@ app.get('/', (c) => {
       }
     }
 
-    // 添加标签（简化版）
+    // 显示标签管理
+    let currentClientIdForTag = null;
+    async function showTagsManagement() {
+      document.getElementById('tagsManagementModal').classList.remove('hidden');
+      await loadTagsList();
+    }
+
+    // 隐藏标签管理
+    function hideTagsManagement() {
+      document.getElementById('tagsManagementModal').classList.add('hidden');
+    }
+
+    // 加载标签列表
+    async function loadTagsList() {
+      const container = document.getElementById('tagsListContainer');
+      container.innerHTML = '<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-2xl text-gray-500"></i></div>';
+      
+      try {
+        const res = await axios.get('/api/tags');
+        tagsData = res.data.tags;
+        renderTagsList(tagsData);
+      } catch (error) {
+        container.innerHTML = '<div class="text-center py-8 text-red-600">加载失败</div>';
+      }
+    }
+
+    // 渲染标签列表
+    function renderTagsList(tags) {
+      const categoriesMap = {
+        'client_trait': '客户特征',
+        'interest': '兴趣点',
+        'risk': '风险',
+        'opportunity': '机会'
+      };
+
+      const grouped = {};
+      tags.forEach(tag => {
+        const cat = tag.category || 'client_trait';
+        if (!grouped[cat]) grouped[cat] = [];
+        grouped[cat].push(tag);
+      });
+
+      const html = Object.entries(grouped).map(([category, categoryTags]) => \`
+        <div class="mb-6">
+          <h3 class="font-semibold text-gray-700 mb-3">\${categoriesMap[category] || category}</h3>
+          <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+            \${categoryTags.map(tag => \`
+              <div class="border rounded-lg p-3 flex items-center justify-between hover:shadow-md transition">
+                <div class="flex items-center space-x-2">
+                  <div class="w-4 h-4 rounded-full" style="background-color: \${tag.color}"></div>
+                  <span class="font-medium text-gray-900">\${tag.name}</span>
+                </div>
+                <button onclick="deleteTag(\${tag.id}, '\${tag.name}')" class="text-red-500 hover:text-red-700">
+                  <i class="fas fa-trash-alt"></i>
+                </button>
+              </div>
+            \`).join('')}
+          </div>
+        </div>
+      \`).join('');
+
+      document.getElementById('tagsListContainer').innerHTML = html || 
+        '<div class="text-center py-8 text-gray-500">暂无标签</div>';
+    }
+
+    // 删除标签
+    async function deleteTag(tagId, tagName) {
+      if (!confirm(\`确定要删除标签"\${tagName}"吗？\`)) return;
+      
+      try {
+        await axios.delete(\`/api/tags/\${tagId}\`);
+        await loadTagsList();
+      } catch (error) {
+        alert('删除失败：' + error.message);
+      }
+    }
+
+    // 为客户添加标签
     async function showAddTagModal(clientId) {
-      alert('标签管理功能开发中...');
+      currentClientIdForTag = clientId;
+      document.getElementById('addTagToClientModal').classList.remove('hidden');
+      
+      // 获取客户当前标签
+      const clientRes = await axios.get(\`/api/clients/\${clientId}\`);
+      const clientTagIds = clientRes.data.tags.map(t => t.id);
+      
+      // 显示可用标签
+      const availableTags = tagsData.filter(t => !clientTagIds.includes(t.id));
+      const html = availableTags.length > 0 ? availableTags.map(tag => \`
+        <button 
+          onclick="addTagToClient(\${tag.id})" 
+          class="w-full text-left px-4 py-2 border rounded-lg hover:bg-gray-50 transition flex items-center justify-between"
+        >
+          <div class="flex items-center space-x-2">
+            <div class="w-3 h-3 rounded-full" style="background-color: \${tag.color}"></div>
+            <span>\${tag.name}</span>
+          </div>
+          <i class="fas fa-plus text-green-600"></i>
+        </button>
+      \`).join('') : '<p class="text-center text-gray-500 py-4">所有标签已添加</p>';
+      
+      document.getElementById('availableTagsList').innerHTML = html;
+    }
+
+    // 隐藏添加标签模态框
+    function hideAddTagToClientModal() {
+      document.getElementById('addTagToClientModal').classList.add('hidden');
+      currentClientIdForTag = null;
+    }
+
+    // 添加标签到客户
+    async function addTagToClient(tagId) {
+      try {
+        await axios.post(\`/api/clients/\${currentClientIdForTag}/tags\`, { tag_id: tagId });
+        hideAddTagToClientModal();
+        viewClientDetail(currentClientIdForTag);
+      } catch (error) {
+        alert('添加失败：' + error.message);
+      }
     }
 
     // 移除标签
@@ -1054,6 +1254,22 @@ app.get('/', (c) => {
         hideNewClientModal();
         await showView('kanban');
         alert('客户创建成功！');
+      } catch (error) {
+        alert('创建失败：' + error.message);
+      }
+    });
+
+    // 提交新建标签表单
+    document.getElementById('newTagForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const data = Object.fromEntries(formData.entries());
+      
+      try {
+        await axios.post('/api/tags', data);
+        e.target.reset();
+        await loadTagsList();
+        alert('标签创建成功！');
       } catch (error) {
         alert('创建失败：' + error.message);
       }
