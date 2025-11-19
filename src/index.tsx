@@ -631,8 +631,311 @@ app.get('/', (c) => {
 
     // 查看客户详情
     async function viewClientDetail(clientId) {
-      alert('客户详情页功能开发中...');
-      // TODO: 实现客户详情页
+      const content = document.getElementById('mainContent');
+      content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
+      
+      try {
+        const res = await axios.get(\`/api/clients/\${clientId}\`);
+        renderClientDetail(res.data);
+      } catch (error) {
+        content.innerHTML = '<div class="text-center py-20 text-red-600">加载失败</div>';
+      }
+    }
+
+    // 渲染客户详情页
+    function renderClientDetail(data) {
+      const { client, tags, logs } = data;
+      
+      const stageOptions = [
+        { value: 'new_lead', label: '新接粉' },
+        { value: 'initial_contact', label: '初步破冰' },
+        { value: 'nurturing', label: '深度培育' },
+        { value: 'high_intent', label: '高意向' },
+        { value: 'joined_group', label: '已进群' },
+        { value: 'opened_account', label: '已开户' },
+        { value: 'deposited', label: '已入金' }
+      ];
+
+      const html = \`
+        <div class="mb-6 flex items-center justify-between">
+          <div class="flex items-center">
+            <button onclick="showView('kanban')" class="mr-4 text-gray-600 hover:text-gray-900">
+              <i class="fas fa-arrow-left text-xl"></i>
+            </button>
+            <h2 class="text-2xl font-bold text-gray-900">\${client.name} - 客户详情</h2>
+          </div>
+          <div class="flex space-x-2">
+            <button onclick="saveClientDetail(\${client.id})" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+              <i class="fas fa-save mr-2"></i>保存
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-6">
+          <!-- 左侧：客户画像 -->
+          <div class="col-span-4 space-y-6">
+            <!-- 基本信息 -->
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <h3 class="text-lg font-bold text-gray-900 mb-4">
+                <i class="fas fa-user-circle mr-2 text-blue-600"></i>基本信息
+              </h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">姓名</label>
+                  <input type="text" id="client_name" value="\${client.name}" 
+                         class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">电话</label>
+                  <input type="text" id="client_phone" value="\${client.phone || ''}" 
+                         class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">微信</label>
+                  <input type="text" id="client_wechat" value="\${client.wechat || ''}" 
+                         class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">邮箱</label>
+                  <input type="email" id="client_email" value="\${client.email || ''}" 
+                         class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">来源</label>
+                  <input type="text" id="client_source" value="\${client.source}" 
+                         class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                </div>
+              </div>
+            </div>
+
+            <!-- 当前阶段 -->
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <h3 class="text-lg font-bold text-gray-900 mb-4">
+                <i class="fas fa-stream mr-2 text-blue-600"></i>当前阶段
+              </h3>
+              <select id="client_stage" class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                      onchange="updateClientStage(\${client.id}, this.value)">
+                \${stageOptions.map(opt => \`
+                  <option value="\${opt.value}" \${client.stage === opt.value ? 'selected' : ''}>
+                    \${opt.label}
+                  </option>
+                \`).join('')}
+              </select>
+              <div class="mt-4 flex items-center justify-between">
+                <span class="text-sm text-gray-600">温度评分</span>
+                <span class="text-2xl font-bold text-blue-600">\${client.temperature_score}/100</span>
+              </div>
+            </div>
+
+            <!-- 兴趣标签 -->
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <h3 class="text-lg font-bold text-gray-900 mb-4">
+                <i class="fas fa-tags mr-2 text-blue-600"></i>标签
+              </h3>
+              <div class="flex flex-wrap gap-2 mb-3">
+                \${tags.map(tag => \`
+                  <span class="px-3 py-1 rounded-full text-sm font-medium" 
+                        style="background-color: \${tag.color}20; color: \${tag.color}">
+                    \${tag.name}
+                    <button onclick="removeTag(\${client.id}, \${tag.id})" class="ml-1 text-xs">×</button>
+                  </span>
+                \`).join('') || '<p class="text-gray-500 text-sm">暂无标签</p>'}
+              </div>
+              <button onclick="showAddTagModal(\${client.id})" class="text-sm text-blue-600 hover:text-blue-800">
+                <i class="fas fa-plus mr-1"></i>添加标签
+              </button>
+            </div>
+
+            <!-- 客户画像 -->
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <h3 class="text-lg font-bold text-gray-900 mb-4">
+                <i class="fas fa-user-tag mr-2 text-blue-600"></i>客户画像
+              </h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">兴趣点</label>
+                  <textarea id="client_interests" rows="2" 
+                            class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="例如：数字货币、股票投资">\${client.interests || ''}</textarea>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">性格特征</label>
+                  <textarea id="client_personality" rows="2" 
+                            class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="例如：理性、谨慎">\${client.personality || ''}</textarea>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">稀缺品质</label>
+                  <textarea id="client_unique_qualities" rows="2" 
+                            class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="例如：决策果断、高净值">\${client.unique_qualities || ''}</textarea>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">行为习惯</label>
+                  <textarea id="client_behavior_patterns" rows="2" 
+                            class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="例如：喜欢晚上联系、回复及时">\${client.behavior_patterns || ''}</textarea>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">投资画像</label>
+                  <textarea id="client_investment_profile" rows="2" 
+                            class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            placeholder="例如：风险偏好高、追求高收益">\${client.investment_profile || ''}</textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：互动日志 -->
+          <div class="col-span-8">
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <h3 class="text-lg font-bold text-gray-900 mb-4">
+                <i class="fas fa-history mr-2 text-blue-600"></i>互动日志
+              </h3>
+
+              <!-- 添加新日志 -->
+              <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 mb-6">
+                <textarea id="new_log_content" rows="4" 
+                          class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 mb-3"
+                          placeholder="记录本次互动的关键信息..."></textarea>
+                <div class="grid grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label class="block text-xs text-gray-600 mb-1">💡 互动亮点</label>
+                    <textarea id="new_log_highlights" rows="2" 
+                              class="w-full px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500"
+                              placeholder="客户积极响应..."></textarea>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-600 mb-1">⚠️ 挑战</label>
+                    <textarea id="new_log_challenges" rows="2" 
+                              class="w-full px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500"
+                              placeholder="客户有疑虑..."></textarea>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-600 mb-1">🎯 明日目标</label>
+                    <textarea id="new_log_next_action" rows="2" 
+                              class="w-full px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500"
+                              placeholder="继续跟进..."></textarea>
+                  </div>
+                </div>
+                <button onclick="addNewLog(\${client.id})" 
+                        class="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
+                  <i class="fas fa-plus mr-2"></i>添加日志
+                </button>
+              </div>
+
+              <!-- 日志 Timeline -->
+              <div class="space-y-4">
+                \${logs.length === 0 ? \`
+                  <p class="text-gray-500 text-center py-8">暂无互动记录</p>
+                \` : logs.map(log => \`
+                  <div class="border-l-4 \${log.sentiment === 'positive' ? 'border-green-500' : 
+                                           log.sentiment === 'negative' ? 'border-red-500' : 
+                                           'border-blue-500'} pl-4 py-2">
+                    <div class="flex items-start justify-between mb-2">
+                      <span class="text-sm font-medium text-gray-900">
+                        \${log.log_type === 'stage_change' ? '📊 阶段变更' : 
+                          log.log_type === 'system_alert' ? '🔔 系统提醒' : '💬 互动记录'}
+                      </span>
+                      <span class="text-xs text-gray-500">
+                        \${new Date(log.created_at).toLocaleString('zh-CN')}
+                      </span>
+                    </div>
+                    <p class="text-gray-700 mb-2">\${log.content}</p>
+                    \${log.highlights ? \`<p class="text-sm text-green-700">💡 \${log.highlights}</p>\` : ''}
+                    \${log.challenges ? \`<p class="text-sm text-orange-700">⚠️ \${log.challenges}</p>\` : ''}
+                    \${log.next_action ? \`<p class="text-sm text-blue-700">🎯 \${log.next_action}</p>\` : ''}
+                  </div>
+                \`).join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+      \`;
+
+      document.getElementById('mainContent').innerHTML = html;
+    }
+
+    // 保存客户详情
+    async function saveClientDetail(clientId) {
+      const data = {
+        name: document.getElementById('client_name').value,
+        phone: document.getElementById('client_phone').value,
+        wechat: document.getElementById('client_wechat').value,
+        email: document.getElementById('client_email').value,
+        source: document.getElementById('client_source').value,
+        interests: document.getElementById('client_interests').value,
+        personality: document.getElementById('client_personality').value,
+        unique_qualities: document.getElementById('client_unique_qualities').value,
+        behavior_patterns: document.getElementById('client_behavior_patterns').value,
+        investment_profile: document.getElementById('client_investment_profile').value
+      };
+
+      try {
+        await axios.put(\`/api/clients/\${clientId}\`, data);
+        alert('保存成功！');
+        viewClientDetail(clientId);
+      } catch (error) {
+        alert('保存失败：' + error.message);
+      }
+    }
+
+    // 更新客户阶段
+    async function updateClientStage(clientId, newStage) {
+      try {
+        await axios.put(\`/api/clients/\${clientId}/stage\`, { 
+          stage: newStage,
+          userId: 2
+        });
+        alert('阶段更新成功！');
+        viewClientDetail(clientId);
+      } catch (error) {
+        alert('更新失败：' + error.message);
+      }
+    }
+
+    // 添加新日志
+    async function addNewLog(clientId) {
+      const content = document.getElementById('new_log_content').value;
+      if (!content.trim()) {
+        alert('请输入日志内容');
+        return;
+      }
+
+      const data = {
+        client_id: clientId,
+        user_id: 2,
+        content: content,
+        highlights: document.getElementById('new_log_highlights').value,
+        challenges: document.getElementById('new_log_challenges').value,
+        next_action: document.getElementById('new_log_next_action').value,
+        sentiment: 'neutral'
+      };
+
+      try {
+        await axios.post('/api/logs', data);
+        alert('日志添加成功！');
+        viewClientDetail(clientId);
+      } catch (error) {
+        alert('添加失败：' + error.message);
+      }
+    }
+
+    // 添加标签（简化版）
+    async function showAddTagModal(clientId) {
+      alert('标签管理功能开发中...');
+    }
+
+    // 移除标签
+    async function removeTag(clientId, tagId) {
+      if (!confirm('确定要移除此标签吗？')) return;
+      
+      try {
+        await axios.delete(\`/api/clients/\${clientId}/tags/\${tagId}\`);
+        viewClientDetail(clientId);
+      } catch (error) {
+        alert('移除失败：' + error.message);
+      }
     }
 
     // 显示新增客户模态框
