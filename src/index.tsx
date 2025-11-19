@@ -584,6 +584,381 @@ app.get('/api/daily-reports/stats/summary', async (c) => {
 });
 
 // ============================================
+// 话术智库 API
+// ============================================
+
+// 获取话术列表
+app.get('/api/scripts', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  const category = c.req.query('category') || '';
+  const search = c.req.query('search') || '';
+  const showPublic = c.req.query('show_public') === 'true';
+  
+  let query = `
+    SELECT s.*, u.name as creator_name
+    FROM scripts s
+    LEFT JOIN users u ON s.user_id = u.id
+    WHERE (s.user_id = ? OR s.is_public = 1)
+  `;
+  const params: any[] = [userId];
+  
+  if (category) {
+    query += ` AND s.category = ?`;
+    params.push(category);
+  }
+  
+  if (search) {
+    query += ` AND (s.title LIKE ? OR s.content LIKE ?)`;
+    const searchPattern = `%${search}%`;
+    params.push(searchPattern, searchPattern);
+  }
+  
+  query += ` ORDER BY s.created_at DESC`;
+  
+  const scripts = await DB.prepare(query).bind(...params).all();
+  
+  return c.json({ success: true, scripts: scripts.results });
+});
+
+// 获取话术详情
+app.get('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  
+  const script = await DB.prepare(`
+    SELECT s.*, u.name as creator_name
+    FROM scripts s
+    LEFT JOIN users u ON s.user_id = u.id
+    WHERE s.id = ?
+  `).bind(scriptId).first();
+  
+  if (!script) {
+    return c.json({ success: false, error: '话术不存在' }, 404);
+  }
+  
+  return c.json({ success: true, script });
+});
+
+// 创建话术
+app.post('/api/scripts', async (c) => {
+  const { DB } = c.env;
+  const data = await c.req.json();
+  const userId = data.user_id || '2';
+  
+  if (!data.title || !data.content) {
+    return c.json({ success: false, error: '标题和内容不能为空' }, 400);
+  }
+  
+  const result = await DB.prepare(`
+    INSERT INTO scripts (
+      user_id, title, content, category, is_public, tags
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(
+    userId,
+    data.title,
+    data.content,
+    data.category || 'general',
+    data.is_public ? 1 : 0,
+    data.tags || '[]'
+  ).run();
+  
+  return c.json({ success: true, scriptId: result.meta.last_row_id });
+});
+
+// 更新话术
+app.put('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  const data = await c.req.json();
+  
+  await DB.prepare(`
+    UPDATE scripts SET
+      title = ?,
+      content = ?,
+      category = ?,
+      is_public = ?,
+      tags = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    data.title,
+    data.content,
+    data.category,
+    data.is_public ? 1 : 0,
+    data.tags || '[]',
+    scriptId
+  ).run();
+  
+  return c.json({ success: true });
+});
+
+// 删除话术
+app.delete('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  
+  await DB.prepare('DELETE FROM scripts WHERE id = ?').bind(scriptId).run();
+  
+  return c.json({ success: true });
+});
+
+// 记录话术使用（增加使用计数）
+app.post('/api/scripts/:id/use', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  
+  await DB.prepare(`
+    UPDATE scripts SET
+      success_count = success_count + 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(scriptId).run();
+  
+  return c.json({ success: true });
+});
+
+// 获取话术使用统计
+app.get('/api/scripts/stats/summary', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  
+  // 总话术数
+  const totalScripts = await DB.prepare(`
+    SELECT COUNT(*) as count FROM scripts WHERE user_id = ?
+  `).bind(userId).first();
+  
+  // 按分类统计
+  const categoryStats = await DB.prepare(`
+    SELECT category, COUNT(*) as count
+    FROM scripts
+    WHERE user_id = ?
+    GROUP BY category
+  `).bind(userId).all();
+  
+  // 最常用话术
+  const topScripts = await DB.prepare(`
+    SELECT * FROM scripts
+    WHERE user_id = ?
+    ORDER BY success_count DESC
+    LIMIT 5
+  `).bind(userId).all();
+  
+  return c.json({
+    success: true,
+    totalScripts: totalScripts?.count || 0,
+    categoryStats: categoryStats.results,
+    topScripts: topScripts.results
+  });
+});
+
+// ============================================
+// 话术智库 API
+// ============================================
+
+// 获取话术列表
+app.get('/api/scripts', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  const category = c.req.query('category') || '';
+  const search = c.req.query('search') || '';
+  const isPublic = c.req.query('is_public');
+  
+  let query = `
+    SELECT s.*, u.name as creator_name 
+    FROM scripts s
+    LEFT JOIN users u ON s.user_id = u.id
+    WHERE (s.user_id = ? OR s.is_public = 1)
+  `;
+  const params: any[] = [userId];
+  
+  if (category) {
+    query += ` AND s.category = ?`;
+    params.push(category);
+  }
+  
+  if (search) {
+    query += ` AND (s.title LIKE ? OR s.content LIKE ?)`;
+    const searchPattern = `%${search}%`;
+    params.push(searchPattern, searchPattern);
+  }
+  
+  if (isPublic !== undefined) {
+    query += ` AND s.is_public = ?`;
+    params.push(isPublic === 'true' ? 1 : 0);
+  }
+  
+  query += ` ORDER BY s.created_at DESC`;
+  
+  const scripts = await DB.prepare(query).bind(...params).all();
+  
+  return c.json({ success: true, scripts: scripts.results });
+});
+
+// 获取话术详情
+app.get('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  
+  const script = await DB.prepare(`
+    SELECT s.*, u.name as creator_name, cl.name as source_client_name
+    FROM scripts s
+    LEFT JOIN users u ON s.user_id = u.id
+    LEFT JOIN clients cl ON s.source_client_id = cl.id
+    WHERE s.id = ?
+  `).bind(scriptId).first();
+  
+  if (!script) {
+    return c.json({ success: false, error: '话术不存在' }, 404);
+  }
+  
+  return c.json({ success: true, script });
+});
+
+// 创建新话术
+app.post('/api/scripts', async (c) => {
+  const { DB } = c.env;
+  const data = await c.req.json();
+  const userId = data.user_id || '2';
+  
+  const result = await DB.prepare(`
+    INSERT INTO scripts (
+      user_id, title, content, category, 
+      source_client_id, tags, is_public
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    userId,
+    data.title,
+    data.content,
+    data.category || 'general',
+    data.source_client_id || null,
+    data.tags || null,
+    data.is_public ? 1 : 0
+  ).run();
+  
+  return c.json({ success: true, scriptId: result.meta.last_row_id });
+});
+
+// 更新话术
+app.put('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  const data = await c.req.json();
+  
+  await DB.prepare(`
+    UPDATE scripts SET
+      title = ?,
+      content = ?,
+      category = ?,
+      source_client_id = ?,
+      tags = ?,
+      is_public = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    data.title,
+    data.content,
+    data.category,
+    data.source_client_id || null,
+    data.tags || null,
+    data.is_public ? 1 : 0,
+    scriptId
+  ).run();
+  
+  return c.json({ success: true });
+});
+
+// 删除话术
+app.delete('/api/scripts/:id', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  
+  await DB.prepare('DELETE FROM scripts WHERE id = ?').bind(scriptId).run();
+  
+  return c.json({ success: true });
+});
+
+// 记录话术使用（增加成功次数）
+app.post('/api/scripts/:id/use', async (c) => {
+  const { DB } = c.env;
+  const scriptId = c.req.param('id');
+  const { client_id, log_id } = await c.req.json();
+  
+  // 增加成功次数
+  await DB.prepare(`
+    UPDATE scripts 
+    SET success_count = success_count + 1 
+    WHERE id = ?
+  `).bind(scriptId).run();
+  
+  // 可选：在客户日志中记录话术使用
+  if (log_id) {
+    await DB.prepare(`
+      UPDATE client_logs 
+      SET script_used = ? 
+      WHERE id = ?
+    `).bind(scriptId, log_id).run();
+  }
+  
+  return c.json({ success: true });
+});
+
+// 获取话术统计
+app.get('/api/scripts/stats/summary', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  
+  // 总话术数
+  const totalScripts = await DB.prepare(`
+    SELECT COUNT(*) as count 
+    FROM scripts 
+    WHERE user_id = ? OR is_public = 1
+  `).bind(userId).first();
+  
+  // 我的话术数
+  const myScripts = await DB.prepare(`
+    SELECT COUNT(*) as count 
+    FROM scripts 
+    WHERE user_id = ?
+  `).bind(userId).first();
+  
+  // 公共话术数
+  const publicScripts = await DB.prepare(`
+    SELECT COUNT(*) as count 
+    FROM scripts 
+    WHERE is_public = 1
+  `).first();
+  
+  // 最常用话术（前5）
+  const topScripts = await DB.prepare(`
+    SELECT id, title, category, success_count
+    FROM scripts
+    WHERE user_id = ? OR is_public = 1
+    ORDER BY success_count DESC
+    LIMIT 5
+  `).bind(userId).all();
+  
+  // 各分类数量
+  const categoryCounts = await DB.prepare(`
+    SELECT category, COUNT(*) as count
+    FROM scripts
+    WHERE user_id = ? OR is_public = 1
+    GROUP BY category
+  `).bind(userId).all();
+  
+  return c.json({
+    success: true,
+    stats: {
+      totalScripts: totalScripts?.count || 0,
+      myScripts: myScripts?.count || 0,
+      publicScripts: publicScripts?.count || 0,
+      topScripts: topScripts.results,
+      categoryCounts: categoryCounts.results
+    }
+  });
+});
+
+// ============================================
 // Dashboard API
 // ============================================
 app.get('/api/dashboard', async (c) => {
@@ -880,6 +1255,9 @@ app.get('/', (c) => {
           <button onclick="showView('reports')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-file-alt mr-2"></i>每日战报
           </button>
+          <button onclick="showView('scripts')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
+            <i class="fas fa-book mr-2"></i>话术智库
+          </button>
           <button onclick="showTagsManagement()" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-tags mr-2"></i>标签管理
           </button>
@@ -1103,6 +1481,9 @@ app.get('/', (c) => {
       } else if (view === 'reports') {
         content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
         await renderDailyReports();
+      } else if (view === 'scripts') {
+        content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
+        await renderScriptsLibrary();
       }
     }
 
@@ -2346,6 +2727,518 @@ app.get('/', (c) => {
       const modal = document.getElementById('reportDetailModal');
       if (modal) {
         modal.remove();
+      }
+    }
+
+    // ============================================
+    // 话术智库功能
+    // ============================================
+    
+    let scriptsData = [];
+    let scriptsStats = null;
+    
+    // 话术分类定义
+    const scriptCategories = {
+      'breaking_ice': { name: '破冰话术', icon: 'fa-handshake', color: 'blue' },
+      'nurturing': { name: '培育话术', icon: 'fa-seedling', color: 'green' },
+      'objection_handling': { name: '异议处理', icon: 'fa-shield-alt', color: 'orange' },
+      'closing': { name: '促成话术', icon: 'fa-flag-checkered', color: 'purple' },
+      'follow_up': { name: '跟进话术', icon: 'fa-sync', color: 'teal' },
+      'general': { name: '通用话术', icon: 'fa-comments', color: 'gray' }
+    };
+    
+    // 渲染话术智库页面
+    async function renderScriptsLibrary() {
+      const content = document.getElementById('mainContent');
+      
+      try {
+        // 获取话术列表
+        const scriptsRes = await axios.get('/api/scripts');
+        scriptsData = scriptsRes.data.scripts;
+        
+        // 获取统计数据
+        const statsRes = await axios.get('/api/scripts/stats/summary');
+        scriptsStats = statsRes.data;
+        
+        const html = \`
+          <div class="mb-6 flex items-center justify-between">
+            <div>
+              <h2 class="text-2xl font-bold text-gray-900">话术智库</h2>
+              <p class="text-gray-600 mt-1">销售话术知识库，积累成功经验</p>
+            </div>
+            <button 
+              onclick="showCreateScriptModal()" 
+              class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+            >
+              <i class="fas fa-plus mr-2"></i>新建话术
+            </button>
+          </div>
+          
+          <!-- 统计卡片 -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">我的话术</p>
+                  <p class="text-3xl font-bold text-blue-600">\${scriptsStats.myScripts}</p>
+                </div>
+                <i class="fas fa-user-edit text-4xl text-blue-200"></i>
+              </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">团队共享</p>
+                  <p class="text-3xl font-bold text-green-600">\${scriptsStats.publicScripts}</p>
+                </div>
+                <i class="fas fa-users text-4xl text-green-200"></i>
+              </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">总话术数</p>
+                  <p class="text-3xl font-bold text-purple-600">\${scriptsStats.totalScripts}</p>
+                </div>
+                <i class="fas fa-book text-4xl text-purple-200"></i>
+              </div>
+            </div>
+          </div>
+          
+          <!-- 最常用话术 -->
+          \${scriptsStats.topScripts && scriptsStats.topScripts.length > 0 ? \`
+            <div class="bg-gradient-to-r from-green-500 to-green-600 rounded-lg shadow-lg p-6 mb-8 text-white">
+              <h3 class="text-xl font-bold mb-4">
+                <i class="fas fa-trophy mr-2"></i>最常用话术 Top 5
+              </h3>
+              <div class="space-y-2">
+                \${scriptsStats.topScripts.map((script, index) => \`
+                  <div class="flex items-center justify-between bg-white bg-opacity-20 rounded px-4 py-2">
+                    <div class="flex items-center space-x-3">
+                      <span class="text-2xl font-bold">#\${index + 1}</span>
+                      <div>
+                        <p class="font-medium">\${script.title}</p>
+                        <p class="text-sm opacity-80">分类: \${scriptCategories[script.category]?.name || script.category}</p>
+                      </div>
+                    </div>
+                    <div class="text-right">
+                      <p class="text-2xl font-bold">\${script.success_count}</p>
+                      <p class="text-xs opacity-80">使用次数</p>
+                    </div>
+                  </div>
+                \`).join('')}
+              </div>
+            </div>
+          \` : ''}
+          
+          <!-- 筛选和搜索 -->
+          <div class="bg-white rounded-lg shadow-sm p-4 mb-6">
+            <div class="flex space-x-3">
+              <div class="relative flex-1">
+                <input 
+                  type="text" 
+                  id="scriptSearchInput"
+                  placeholder="搜索话术标题或内容..." 
+                  class="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  onkeyup="handleScriptSearch(this.value)"
+                >
+                <i class="fas fa-search absolute left-3 top-3 text-gray-400"></i>
+              </div>
+              
+              <select 
+                id="categoryFilter" 
+                class="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                onchange="handleScriptFilter()"
+              >
+                <option value="">所有分类</option>
+                \${Object.entries(scriptCategories).map(([key, cat]) => \`
+                  <option value="\${key}">\${cat.name}</option>
+                \`).join('')}
+              </select>
+              
+              <select 
+                id="publicFilter" 
+                class="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                onchange="handleScriptFilter()"
+              >
+                <option value="">全部</option>
+                <option value="false">我的</option>
+                <option value="true">团队共享</option>
+              </select>
+            </div>
+          </div>
+          
+          <!-- 话术列表 -->
+          <div class="bg-white rounded-lg shadow-sm p-6">
+            <h3 class="text-xl font-bold text-gray-900 mb-4">
+              <i class="fas fa-list mr-2"></i>话术列表
+            </h3>
+            
+            \${scriptsData.length === 0 ? \`
+              <div class="text-center py-12 text-gray-500">
+                <i class="fas fa-inbox text-5xl mb-4"></i>
+                <p>暂无话术记录</p>
+                <button 
+                  onclick="showCreateScriptModal()" 
+                  class="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  创建第一个话术
+                </button>
+              </div>
+            \` : \`
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                \${scriptsData.map(script => renderScriptCard(script)).join('')}
+              </div>
+            \`}
+          </div>
+        \`;
+        
+        content.innerHTML = html;
+        
+      } catch (error) {
+        console.error('加载话术失败:', error);
+        content.innerHTML = '<div class="text-center py-20 text-red-600">加载失败</div>';
+      }
+    }
+    
+    // 渲染话术卡片
+    function renderScriptCard(script) {
+      const category = scriptCategories[script.category] || scriptCategories['general'];
+      const colorClasses = {
+        blue: 'bg-blue-50 text-blue-700 border-blue-200',
+        green: 'bg-green-50 text-green-700 border-green-200',
+        orange: 'bg-orange-50 text-orange-700 border-orange-200',
+        purple: 'bg-purple-50 text-purple-700 border-purple-200',
+        teal: 'bg-teal-50 text-teal-700 border-teal-200',
+        gray: 'bg-gray-50 text-gray-700 border-gray-200'
+      };
+      
+      return \`
+        <div class="border rounded-lg p-4 hover:shadow-md transition cursor-pointer" 
+             onclick="viewScriptDetail(\${script.id})">
+          <div class="flex items-start justify-between mb-3">
+            <div class="flex items-center space-x-2">
+              <span class="\${colorClasses[category.color]} px-3 py-1 rounded-full text-xs font-medium border">
+                <i class="fas \${category.icon} mr-1"></i>
+                \${category.name}
+              </span>
+              \${script.is_public ? \`
+                <span class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs">
+                  <i class="fas fa-share-alt mr-1"></i>共享
+                </span>
+              \` : ''}
+            </div>
+            <div class="flex items-center space-x-2">
+              <span class="text-sm text-gray-500">
+                <i class="fas fa-fire text-orange-500 mr-1"></i>
+                \${script.success_count || 0}
+              </span>
+              <button 
+                onclick="event.stopPropagation(); useScript(\${script.id})" 
+                class="text-blue-600 hover:text-blue-800"
+                title="使用此话术"
+              >
+                <i class="fas fa-plus-circle"></i>
+              </button>
+            </div>
+          </div>
+          
+          <h4 class="text-lg font-semibold text-gray-900 mb-2">\${script.title}</h4>
+          <p class="text-gray-600 text-sm line-clamp-2 mb-3">\${script.content}</p>
+          
+          <div class="flex items-center justify-between text-xs text-gray-500">
+            <span>
+              <i class="fas fa-user mr-1"></i>
+              \${script.creator_name || '未知'}
+            </span>
+            <span>
+              <i class="fas fa-clock mr-1"></i>
+              \${new Date(script.created_at).toLocaleDateString()}
+            </span>
+          </div>
+        </div>
+      \`;
+    }
+    
+    // 搜索话术（防抖）
+    let scriptSearchTimeout;
+    function handleScriptSearch(keyword) {
+      clearTimeout(scriptSearchTimeout);
+      scriptSearchTimeout = setTimeout(async () => {
+        await handleScriptFilter();
+      }, 300);
+    }
+    
+    // 筛选话术
+    async function handleScriptFilter() {
+      const searchInput = document.getElementById('scriptSearchInput')?.value || '';
+      const category = document.getElementById('categoryFilter')?.value || '';
+      const isPublic = document.getElementById('publicFilter')?.value;
+      
+      try {
+        const params = { search: searchInput };
+        if (category) params.category = category;
+        if (isPublic !== '') params.is_public = isPublic;
+        
+        const res = await axios.get('/api/scripts', { params });
+        scriptsData = res.data.scripts;
+        await renderScriptsLibrary();
+      } catch (error) {
+        console.error('筛选失败:', error);
+      }
+    }
+    
+    // 显示创建话术模态框
+    function showCreateScriptModal(editScript = null) {
+      const isEdit = !!editScript;
+      
+      const modal = document.createElement('div');
+      modal.id = 'createScriptModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">
+              <i class="fas fa-\${isEdit ? 'edit' : 'plus'} mr-2 text-blue-600"></i>
+              \${isEdit ? '编辑话术' : '新建话术'}
+            </h2>
+            <button onclick="closeCreateScriptModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <form id="createScriptForm" class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">话术标题 *</label>
+              <input 
+                type="text" 
+                name="title" 
+                value="\${editScript?.title || ''}"
+                required 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="例如：高净值客户破冰话术"
+              >
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">话术分类 *</label>
+              <select 
+                name="category" 
+                required 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              >
+                \${Object.entries(scriptCategories).map(([key, cat]) => \`
+                  <option value="\${key}" \${editScript?.category === key ? 'selected' : ''}>
+                    \${cat.name}
+                  </option>
+                \`).join('')}
+              </select>
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">话术内容 *</label>
+              <textarea 
+                name="content" 
+                rows="8" 
+                required 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="输入完整的话术内容，可以包括：\n- 开场白\n- 核心话术\n- 可能的应对方案\n- 注意事项"
+              >\${editScript?.content || ''}</textarea>
+            </div>
+            
+            <div class="flex items-center space-x-2">
+              <input 
+                type="checkbox" 
+                name="is_public" 
+                id="isPublicCheck"
+                \${editScript?.is_public ? 'checked' : ''}
+                class="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+              >
+              <label for="isPublicCheck" class="text-sm text-gray-700">
+                <i class="fas fa-share-alt mr-1 text-green-600"></i>
+                团队共享（其他成员可查看和使用）
+              </label>
+            </div>
+            
+            <div class="flex space-x-3 pt-4">
+              <button 
+                type="submit" 
+                class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-medium transition"
+              >
+                <i class="fas fa-\${isEdit ? 'save' : 'check'} mr-2"></i>
+                \${isEdit ? '保存修改' : '创建话术'}
+              </button>
+              <button 
+                type="button" 
+                onclick="closeCreateScriptModal()" 
+                class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition"
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+      
+      // 绑定表单提交事件
+      document.getElementById('createScriptForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+          title: formData.get('title'),
+          content: formData.get('content'),
+          category: formData.get('category'),
+          is_public: formData.get('is_public') === 'on'
+        };
+        
+        try {
+          if (isEdit) {
+            await axios.put(\`/api/scripts/\${editScript.id}\`, data);
+            alert('话术更新成功！');
+          } else {
+            await axios.post('/api/scripts', data);
+            alert('话术创建成功！');
+          }
+          closeCreateScriptModal();
+          await renderScriptsLibrary();
+        } catch (error) {
+          alert('操作失败：' + (error.response?.data?.error || error.message));
+        }
+      });
+    }
+    
+    // 关闭创建话术模态框
+    function closeCreateScriptModal() {
+      const modal = document.getElementById('createScriptModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 查看话术详情
+    async function viewScriptDetail(scriptId) {
+      try {
+        const res = await axios.get(\`/api/scripts/\${scriptId}\`);
+        const script = res.data.script;
+        const category = scriptCategories[script.category] || scriptCategories['general'];
+        
+        const modal = document.createElement('div');
+        modal.id = 'scriptDetailModal';
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = \`
+          <div class="bg-white rounded-lg p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+              <div>
+                <div class="flex items-center space-x-3 mb-2">
+                  <span class="bg-\${category.color}-100 text-\${category.color}-700 px-3 py-1 rounded-full text-sm font-medium">
+                    <i class="fas \${category.icon} mr-1"></i>
+                    \${category.name}
+                  </span>
+                  \${script.is_public ? \`
+                    <span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm">
+                      <i class="fas fa-share-alt mr-1"></i>团队共享
+                    </span>
+                  \` : ''}
+                  <span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-sm">
+                    <i class="fas fa-fire mr-1"></i>使用 \${script.success_count || 0} 次
+                  </span>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-900">\${script.title}</h2>
+              </div>
+              <button onclick="closeScriptDetailModal()" class="text-gray-500 hover:text-gray-700">
+                <i class="fas fa-times text-2xl"></i>
+              </button>
+            </div>
+            
+            <div class="bg-gray-50 rounded-lg p-6 mb-6">
+              <h3 class="text-lg font-semibold text-gray-900 mb-3">话术内容</h3>
+              <p class="text-gray-700 whitespace-pre-wrap">\${script.content}</p>
+            </div>
+            
+            <div class="border-t pt-4 mb-6">
+              <div class="grid grid-cols-2 gap-4 text-sm text-gray-600">
+                <div>
+                  <i class="fas fa-user mr-2 text-blue-600"></i>
+                  创建人：\${script.creator_name || '未知'}
+                </div>
+                <div>
+                  <i class="fas fa-clock mr-2 text-blue-600"></i>
+                  创建时间：\${new Date(script.created_at).toLocaleString('zh-CN')}
+                </div>
+                \${script.source_client_name ? \`
+                  <div>
+                    <i class="fas fa-user-check mr-2 text-green-600"></i>
+                    成功案例：\${script.source_client_name}
+                  </div>
+                \` : ''}
+              </div>
+            </div>
+            
+            <div class="flex space-x-3">
+              <button 
+                onclick="useScript(\${script.id})" 
+                class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition"
+              >
+                <i class="fas fa-check-circle mr-2"></i>使用此话术
+              </button>
+              <button 
+                onclick="showCreateScriptModal(\${JSON.stringify(script).replace(/"/g, '&quot;')})" 
+                class="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+              >
+                <i class="fas fa-edit mr-2"></i>编辑
+              </button>
+              <button 
+                onclick="deleteScript(\${script.id}, '\${script.title}')" 
+                class="px-6 py-3 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition"
+              >
+                <i class="fas fa-trash-alt mr-2"></i>删除
+              </button>
+            </div>
+          </div>
+        \`;
+        
+        document.body.appendChild(modal);
+        
+      } catch (error) {
+        alert('加载失败：' + error.message);
+      }
+    }
+    
+    // 关闭话术详情模态框
+    function closeScriptDetailModal() {
+      const modal = document.getElementById('scriptDetailModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 使用话术
+    async function useScript(scriptId) {
+      try {
+        await axios.post(\`/api/scripts/\${scriptId}/use\`, {});
+        alert('已记录使用！成功次数 +1');
+        closeScriptDetailModal();
+        await renderScriptsLibrary();
+      } catch (error) {
+        alert('记录失败：' + error.message);
+      }
+    }
+    
+    // 删除话术
+    async function deleteScript(scriptId, scriptTitle) {
+      if (!confirm(\`确定要删除话术"\${scriptTitle}"吗？\`)) return;
+      
+      try {
+        await axios.delete(\`/api/scripts/\${scriptId}\`);
+        alert('删除成功！');
+        closeScriptDetailModal();
+        await renderScriptsLibrary();
+      } catch (error) {
+        alert('删除失败：' + error.message);
       }
     }
 
