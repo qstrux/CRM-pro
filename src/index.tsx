@@ -1406,6 +1406,185 @@ app.delete('/api/alerts/:id', async (c) => {
 });
 
 // ============================================
+// 温度自动计算系统 API
+// ============================================
+
+// 计算单个客户温度
+async function calculateClientTemperature(DB: D1Database, clientId: number) {
+  // 获取客户基本信息
+  const client = await DB.prepare(`
+    SELECT 
+      c.*,
+      COUNT(DISTINCT cl.id) as total_interactions,
+      MAX(cl.created_at) as last_interaction
+    FROM clients c
+    LEFT JOIN client_logs cl ON c.id = cl.client_id 
+      AND cl.log_type = 'interaction'
+      AND julianday('now') - julianday(cl.created_at) <= 30
+    WHERE c.id = ?
+    GROUP BY c.id
+  `).bind(clientId).first();
+  
+  if (!client) {
+    return null;
+  }
+  
+  let score = 50; // 基础分50分
+  
+  // === 1. 阶段评分 (0-25分) ===
+  const stageScores: { [key: string]: number } = {
+    'new_lead': 0,
+    'initial_contact': 5,
+    'nurturing': 10,
+    'high_intent': 20,
+    'joined_group': 22,
+    'opened_account': 23,
+    'deposited': 25
+  };
+  score += stageScores[client.stage as string] || 0;
+  
+  // === 2. 互动频率评分 (0-25分) ===
+  const interactionCount = client.total_interactions || 0;
+  if (interactionCount >= 20) score += 25;
+  else if (interactionCount >= 15) score += 20;
+  else if (interactionCount >= 10) score += 15;
+  else if (interactionCount >= 5) score += 10;
+  else if (interactionCount >= 2) score += 5;
+  
+  // === 3. 最近互动时长评分 (-20 到 +15分) ===
+  if (client.last_interaction) {
+    const hoursSinceInteraction = 
+      (new Date().getTime() - new Date(client.last_interaction as string).getTime()) / (1000 * 3600);
+    
+    if (hoursSinceInteraction <= 24) score += 15;      // 24小时内 +15
+    else if (hoursSinceInteraction <= 48) score += 10; // 48小时内 +10
+    else if (hoursSinceInteraction <= 72) score += 5;  // 72小时内 +5
+    else if (hoursSinceInteraction <= 168) score += 0; // 1周内 0
+    else if (hoursSinceInteraction <= 336) score -= 10; // 2周内 -10
+    else score -= 20; // 超过2周 -20
+  } else {
+    score -= 10; // 从未互动 -10
+  }
+  
+  // === 4. 情绪评分 (-10 到 +10分) ===
+  const sentiments = await DB.prepare(`
+    SELECT sentiment, COUNT(*) as count
+    FROM client_logs
+    WHERE client_id = ? AND sentiment IS NOT NULL
+      AND julianday('now') - julianday(created_at) <= 30
+    GROUP BY sentiment
+  `).bind(clientId).all();
+  
+  let positiveCount = 0;
+  let negativeCount = 0;
+  for (const s of sentiments.results || []) {
+    if (s.sentiment === 'positive') positiveCount = s.count as number;
+    if (s.sentiment === 'negative') negativeCount = s.count as number;
+  }
+  
+  if (positiveCount > negativeCount * 2) score += 10;
+  else if (positiveCount > negativeCount) score += 5;
+  else if (negativeCount > positiveCount) score -= 5;
+  else if (negativeCount > positiveCount * 2) score -= 10;
+  
+  // 限制在 0-100 范围
+  score = Math.max(0, Math.min(100, score));
+  
+  // 确定温度等级
+  let level = 'neutral';
+  if (score >= 80) level = 'hot';
+  else if (score >= 60) level = 'warm';
+  else if (score >= 40) level = 'neutral';
+  else level = 'cold';
+  
+  return {
+    score: Math.round(score),
+    level,
+    details: {
+      stageScore: stageScores[client.stage as string] || 0,
+      interactionCount,
+      hoursSinceInteraction: client.last_interaction 
+        ? Math.round((new Date().getTime() - new Date(client.last_interaction as string).getTime()) / (1000 * 3600))
+        : null,
+      positiveCount,
+      negativeCount
+    }
+  };
+}
+
+// 批量更新所有客户温度
+app.post('/api/temperature/update-all', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  // 获取该用户的所有非归档客户
+  const clients = await DB.prepare(`
+    SELECT id FROM clients 
+    WHERE user_id = ? AND is_archived = 0
+  `).bind(userId).all();
+  
+  let updatedCount = 0;
+  const results = [];
+  
+  for (const client of clients.results || []) {
+    const temp = await calculateClientTemperature(DB, client.id as number);
+    if (temp) {
+      await DB.prepare(`
+        UPDATE clients 
+        SET temperature_score = ?,
+            temperature_level = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(temp.score, temp.level, client.id).run();
+      
+      updatedCount++;
+      results.push({
+        clientId: client.id,
+        score: temp.score,
+        level: temp.level
+      });
+    }
+  }
+  
+  return c.json({
+    success: true,
+    updated: updatedCount,
+    total: clients.results?.length || 0,
+    results
+  });
+});
+
+// 更新单个客户温度
+app.post('/api/temperature/update/:clientId', async (c) => {
+  const { DB } = c.env;
+  const clientId = parseInt(c.req.param('clientId'));
+  
+  const temp = await calculateClientTemperature(DB, clientId);
+  
+  if (!temp) {
+    return c.json({ success: false, error: '客户不存在' }, 404);
+  }
+  
+  await DB.prepare(`
+    UPDATE clients 
+    SET temperature_score = ?,
+        temperature_level = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(temp.score, temp.level, clientId).run();
+  
+  return c.json({
+    success: true,
+    clientId,
+    temperature: temp
+  });
+});
+
+// ============================================
 // 登录/注册页面
 // ============================================
 app.get('/login', (c) => {
@@ -2030,12 +2209,21 @@ app.get('/', (c) => {
             <h2 class="text-2xl font-bold text-gray-900">数据仪表盘</h2>
             <p class="text-gray-600 mt-1">实时业绩概览</p>
           </div>
-          <button 
-            onclick="showView('reports')" 
-            class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
-          >
-            <i class="fas fa-file-alt mr-2"></i>查看每日战报
-          </button>
+          <div class="flex space-x-3">
+            <button 
+              onclick="updateAllTemperatures()" 
+              class="px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-medium"
+              title="重新计算所有客户温度评分"
+            >
+              <i class="fas fa-thermometer-half mr-2"></i>更新温度
+            </button>
+            <button 
+              onclick="showView('reports')" 
+              class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+            >
+              <i class="fas fa-file-alt mr-2"></i>查看每日战报
+            </button>
+          </div>
         </div>
         
         <!-- KPI 卡片 -->
@@ -2199,9 +2387,17 @@ app.get('/', (c) => {
                   </option>
                 \`).join('')}
               </select>
-              <div class="mt-4 flex items-center justify-between">
-                <span class="text-sm text-gray-600">温度评分</span>
-                <span class="text-2xl font-bold text-blue-600">\${client.temperature_score}/100</span>
+              <div class="mt-4 space-y-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm text-gray-600">温度评分</span>
+                  <span class="text-2xl font-bold text-blue-600">\${client.temperature_score}/100</span>
+                </div>
+                <button 
+                  onclick="recalculateTemperature(\${client.id})" 
+                  class="w-full text-sm bg-blue-50 text-blue-600 py-2 rounded hover:bg-blue-100 transition"
+                >
+                  <i class="fas fa-sync-alt mr-2"></i>重新计算温度
+                </button>
               </div>
             </div>
 
@@ -4668,6 +4864,108 @@ app.get('/', (c) => {
       checkOverdueClients();
       loadAlerts();
     }, 2000);
+
+    // ============================================
+    // 温度自动计算功能
+    // ============================================
+    
+    // 重新计算单个客户温度
+    async function recalculateTemperature(clientId) {
+      try {
+        const res = await axios.post(\`/api/temperature/update/\${clientId}\`);
+        
+        if (res.data.success) {
+          const temp = res.data.temperature;
+          
+          // 显示详细信息
+          const details = \`
+温度计算完成！
+
+新温度评分：\${temp.score}/100
+温度等级：\${getTempLevelText(temp.level)}
+
+计算详情：
+━━━━━━━━━━━━━━━━━━━━━
+🎯 阶段评分：\${temp.details.stageScore} 分
+💬 互动次数：\${temp.details.interactionCount} 次
+⏰ 距上次互动：\${temp.details.hoursSinceInteraction || '未知'} 小时
+😊 正向情绪：\${temp.details.positiveCount} 次
+😟 负向情绪：\${temp.details.negativeCount} 次
+
+温度算法说明：
+基础分50分 +
+阶段评分(0-25) +
+互动频率(0-25) +
+最近互动(-20至+15) +
+情绪评分(-10至+10)
+          \`;
+          
+          alert(details);
+          
+          // 刷新客户详情页面
+          showClientDetail(clientId);
+        } else {
+          alert('计算失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('计算失败：' + error.message);
+      }
+    }
+    
+    // 批量更新所有客户温度
+    async function updateAllTemperatures() {
+      if (!confirm('确定要重新计算所有客户的温度吗？这可能需要一些时间。')) {
+        return;
+      }
+      
+      try {
+        const res = await axios.post(\`/api/temperature/update-all?user_id=\${currentUser.id}\`);
+        
+        if (res.data.success) {
+          alert(\`温度计算完成！\\n\\n总计：\${res.data.total} 个客户\\n已更新：\${res.data.updated} 个客户\`);
+          
+          // 刷新当前视图
+          const currentView = document.querySelector('[onclick*="showView"]')?.getAttribute('onclick')?.match(/'(\w+)'/)?.[1];
+          if (currentView) {
+            showView(currentView);
+          }
+        } else {
+          alert('计算失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('计算失败：' + error.message);
+      }
+    }
+    
+    function getTempLevelText(level) {
+      const texts = {
+        hot: '🔥 热（80-100）',
+        warm: '🌤️ 温（60-79）',
+        neutral: '☁️ 中性（40-59）',
+        cold: '❄️ 冷（0-39）'
+      };
+      return texts[level] || level;
+    }
+    
+    // 每日自动计算温度（每天凌晨2点）
+    function scheduleTemperatureUpdate() {
+      const now = new Date();
+      const night = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        2, 0, 0, 0
+      );
+      const msToMidnight = night.getTime() - now.getTime();
+      
+      setTimeout(() => {
+        updateAllTemperatures();
+        setInterval(updateAllTemperatures, 24 * 60 * 60 * 1000); // 每24小时
+      }, msToMidnight);
+    }
+    
+    // 启动定时任务
+    scheduleTemperatureUpdate();
 
     // 启动应用
     initApp();
