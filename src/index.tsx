@@ -2024,6 +2024,294 @@ app.get('/api/export/clients/json', async (c) => {
 });
 
 // ============================================
+// 高级筛选与搜索 API
+// ============================================
+
+// 高级搜索客户
+app.post('/api/clients/advanced-search', async (c) => {
+  const { DB } = c.env;
+  const body = await c.req.json();
+  const { 
+    userId,
+    keyword,           // 关键词搜索
+    stages,            // 阶段筛选（数组）
+    temperatureLevels, // 温度等级筛选（数组）
+    tags,              // 标签筛选（数组）
+    isHighOpportunity, // 高机会筛选
+    isHighRisk,        // 高风险筛选
+    dateFrom,          // 创建日期范围（开始）
+    dateTo,            // 创建日期范围（结束）
+    lastInteractionFrom, // 最后互动日期范围（开始）
+    lastInteractionTo    // 最后互动日期范围（结束）
+  } = body;
+  
+  let query = `
+    SELECT DISTINCT c.*
+    FROM clients c
+    LEFT JOIN client_tags ct ON c.id = ct.client_id
+    LEFT JOIN tags t ON ct.tag_id = t.id
+    WHERE c.user_id = ? AND c.is_archived = 0
+  `;
+  
+  const params: any[] = [userId];
+  
+  // 关键词搜索（姓名、电话、微信、邮箱）
+  if (keyword) {
+    query += ` AND (
+      c.name LIKE ? OR 
+      c.phone LIKE ? OR 
+      c.wechat LIKE ? OR 
+      c.email LIKE ? OR
+      c.source LIKE ?
+    )`;
+    const keywordParam = `%${keyword}%`;
+    params.push(keywordParam, keywordParam, keywordParam, keywordParam, keywordParam);
+  }
+  
+  // 阶段筛选
+  if (stages && stages.length > 0) {
+    query += ` AND c.stage IN (${stages.map(() => '?').join(',')})`;
+    params.push(...stages);
+  }
+  
+  // 温度等级筛选
+  if (temperatureLevels && temperatureLevels.length > 0) {
+    query += ` AND c.temperature_level IN (${temperatureLevels.map(() => '?').join(',')})`;
+    params.push(...temperatureLevels);
+  }
+  
+  // 标签筛选
+  if (tags && tags.length > 0) {
+    query += ` AND t.id IN (${tags.map(() => '?').join(',')})`;
+    params.push(...tags);
+  }
+  
+  // 高机会筛选
+  if (isHighOpportunity !== undefined) {
+    query += ` AND c.is_high_opportunity = ?`;
+    params.push(isHighOpportunity ? 1 : 0);
+  }
+  
+  // 高风险筛选
+  if (isHighRisk !== undefined) {
+    query += ` AND c.is_high_risk = ?`;
+    params.push(isHighRisk ? 1 : 0);
+  }
+  
+  // 创建日期范围
+  if (dateFrom) {
+    query += ` AND DATE(c.created_at) >= ?`;
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    query += ` AND DATE(c.created_at) <= ?`;
+    params.push(dateTo);
+  }
+  
+  // 最后互动日期范围
+  if (lastInteractionFrom) {
+    query += ` AND DATE(c.last_interaction_at) >= ?`;
+    params.push(lastInteractionFrom);
+  }
+  if (lastInteractionTo) {
+    query += ` AND DATE(c.last_interaction_at) <= ?`;
+    params.push(lastInteractionTo);
+  }
+  
+  query += ` ORDER BY c.updated_at DESC`;
+  
+  const result = await DB.prepare(query).bind(...params).all();
+  
+  return c.json({
+    success: true,
+    clients: result.results || [],
+    total: result.results?.length || 0,
+    filters: {
+      keyword,
+      stages,
+      temperatureLevels,
+      tags,
+      isHighOpportunity,
+      isHighRisk,
+      dateFrom,
+      dateTo,
+      lastInteractionFrom,
+      lastInteractionTo
+    }
+  });
+});
+
+// 保存搜索条件
+app.post('/api/search/save', async (c) => {
+  const { DB } = c.env;
+  const body = await c.req.json();
+  const { userId, name, filters } = body;
+  
+  const result = await DB.prepare(`
+    INSERT INTO saved_searches (user_id, name, filters, created_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+  `).bind(userId, name, JSON.stringify(filters)).run();
+  
+  return c.json({
+    success: true,
+    searchId: result.meta.last_row_id
+  });
+});
+
+// 获取保存的搜索条件
+app.get('/api/search/saved', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  const result = await DB.prepare(`
+    SELECT * FROM saved_searches
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `).bind(userId).all();
+  
+  return c.json({
+    success: true,
+    searches: result.results || []
+  });
+});
+
+// ============================================
+// 批量操作 API
+// ============================================
+
+// 批量更新客户阶段
+app.post('/api/clients/batch-update-stage', async (c) => {
+  const { DB } = c.env;
+  const { clientIds, stage, userId } = await c.req.json();
+  
+  if (!clientIds || clientIds.length === 0) {
+    return c.json({ success: false, error: '未选择客户' }, 400);
+  }
+  
+  let updated = 0;
+  for (const clientId of clientIds) {
+    await DB.prepare(`UPDATE clients SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(stage, clientId).run();
+    
+    // 记录阶段变更
+    const client = await DB.prepare(`SELECT stage FROM clients WHERE id = ?`).bind(clientId).first();
+    await DB.prepare(`
+      INSERT INTO client_stages (client_id, user_id, from_stage, to_stage)
+      VALUES (?, ?, ?, ?)
+    `).bind(clientId, userId, client?.stage, stage).run();
+    
+    updated++;
+  }
+  
+  return c.json({
+    success: true,
+    updated,
+    message: `成功更新 ${updated} 个客户的阶段`
+  });
+});
+
+// 批量添加标签
+app.post('/api/clients/batch-add-tags', async (c) => {
+  const { DB } = c.env;
+  const { clientIds, tagIds } = await c.req.json();
+  
+  if (!clientIds || clientIds.length === 0 || !tagIds || tagIds.length === 0) {
+    return c.json({ success: false, error: '参数不完整' }, 400);
+  }
+  
+  let added = 0;
+  for (const clientId of clientIds) {
+    for (const tagId of tagIds) {
+      try {
+        await DB.prepare(`INSERT OR IGNORE INTO client_tags (client_id, tag_id) VALUES (?, ?)`)
+          .bind(clientId, tagId).run();
+        added++;
+      } catch (e) {
+        // 忽略重复标签
+      }
+    }
+  }
+  
+  return c.json({
+    success: true,
+    added,
+    message: `成功添加 ${added} 个标签关联`
+  });
+});
+
+// 批量移除标签
+app.post('/api/clients/batch-remove-tags', async (c) => {
+  const { DB } = c.env;
+  const { clientIds, tagIds } = await c.req.json();
+  
+  if (!clientIds || clientIds.length === 0 || !tagIds || tagIds.length === 0) {
+    return c.json({ success: false, error: '参数不完整' }, 400);
+  }
+  
+  let removed = 0;
+  for (const clientId of clientIds) {
+    for (const tagId of tagIds) {
+      await DB.prepare(`DELETE FROM client_tags WHERE client_id = ? AND tag_id = ?`)
+        .bind(clientId, tagId).run();
+      removed++;
+    }
+  }
+  
+  return c.json({
+    success: true,
+    removed,
+    message: `成功移除 ${removed} 个标签关联`
+  });
+});
+
+// 批量归档客户
+app.post('/api/clients/batch-archive', async (c) => {
+  const { DB } = c.env;
+  const { clientIds, reason } = await c.req.json();
+  
+  if (!clientIds || clientIds.length === 0) {
+    return c.json({ success: false, error: '未选择客户' }, 400);
+  }
+  
+  for (const clientId of clientIds) {
+    await DB.prepare(`
+      UPDATE clients 
+      SET is_archived = 1, 
+          archive_reason = ?,
+          archived_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(reason || '批量归档', clientId).run();
+  }
+  
+  return c.json({
+    success: true,
+    archived: clientIds.length,
+    message: `成功归档 ${clientIds.length} 个客户`
+  });
+});
+
+// 批量删除客户
+app.post('/api/clients/batch-delete', async (c) => {
+  const { DB } = c.env;
+  const { clientIds } = await c.req.json();
+  
+  if (!clientIds || clientIds.length === 0) {
+    return c.json({ success: false, error: '未选择客户' }, 400);
+  }
+  
+  for (const clientId of clientIds) {
+    await DB.prepare(`DELETE FROM clients WHERE id = ?`).bind(clientId).run();
+  }
+  
+  return c.json({
+    success: true,
+    deleted: clientIds.length,
+    message: `成功删除 ${clientIds.length} 个客户`
+  });
+});
+
+// ============================================
 // 登录/注册页面
 // ============================================
 app.get('/login', (c) => {
@@ -2659,6 +2947,13 @@ app.get('/', (c) => {
               <option value="neutral">☁️ 中 (\${tempStats.neutral})</option>
               <option value="cold">❄️ 冷 (\${tempStats.cold})</option>
             </select>
+            <button 
+              onclick="showAdvancedSearchModal()" 
+              class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-medium"
+              title="高级筛选"
+            >
+              <i class="fas fa-filter mr-2"></i>高级筛选
+            </button>
             <button 
               onclick="showExportModal()" 
               class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-medium"
@@ -5897,6 +6192,252 @@ app.get('/', (c) => {
       // 注意：这需要引入 SheetJS 库
       // 为简化实现，这里先返回 JSON，用户可使用在线工具转换
       return data;
+    }
+
+    // ============================================
+    // 高级筛选与搜索功能
+    // ============================================
+    
+    let currentFilters = {};
+    
+    // 显示高级搜索模态框
+    async function showAdvancedSearchModal() {
+      // 获取所有标签
+      const tagsRes = await axios.get('/api/tags');
+      const allTags = tagsRes.data.tags || [];
+      
+      const modal = document.createElement('div');
+      modal.id = 'advancedSearchModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-4xl w-full mx-4 my-8">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">
+              <i class="fas fa-filter mr-2 text-purple-600"></i>
+              高级筛选
+            </h2>
+            <button onclick="closeAdvancedSearchModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <div class="grid grid-cols-2 gap-6">
+            <!-- 关键词搜索 -->
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-search mr-2"></i>关键词搜索
+              </label>
+              <input 
+                type="text" 
+                id="filterKeyword"
+                placeholder="搜索姓名、电话、微信、邮箱、来源..." 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-purple-500"
+              >
+            </div>
+            
+            <!-- 阶段筛选 -->
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-layer-group mr-2"></i>阶段筛选
+              </label>
+              <div class="space-y-2 max-h-40 overflow-y-auto border rounded-lg p-3">
+                <label class="flex items-center">
+                  <input type="checkbox" value="new_lead" class="stage-filter mr-2">
+                  新接粉
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="initial_contact" class="stage-filter mr-2">
+                  初步破冰
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="nurturing" class="stage-filter mr-2">
+                  深度培育
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="high_intent" class="stage-filter mr-2">
+                  高意向
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="joined_group" class="stage-filter mr-2">
+                  已进群
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="opened_account" class="stage-filter mr-2">
+                  已开户
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="deposited" class="stage-filter mr-2">
+                  已入金
+                </label>
+              </div>
+            </div>
+            
+            <!-- 温度筛选 -->
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-thermometer-half mr-2"></i>温度筛选
+              </label>
+              <div class="space-y-2 border rounded-lg p-3">
+                <label class="flex items-center">
+                  <input type="checkbox" value="hot" class="temp-filter mr-2">
+                  🔥 热（80-100）
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="warm" class="temp-filter mr-2">
+                  🌤️ 温（60-79）
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="neutral" class="temp-filter mr-2">
+                  ☁️ 中性（40-59）
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" value="cold" class="temp-filter mr-2">
+                  ❄️ 冷（0-39）
+                </label>
+              </div>
+            </div>
+            
+            <!-- 标签筛选 -->
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-tags mr-2"></i>标签筛选
+              </label>
+              <div class="grid grid-cols-4 gap-2 max-h-40 overflow-y-auto border rounded-lg p-3">
+                \${allTags.map(tag => \`
+                  <label class="flex items-center text-sm">
+                    <input type="checkbox" value="\${tag.id}" class="tag-filter mr-2">
+                    <span style="color: \${tag.color}">\${tag.name}</span>
+                  </label>
+                \`).join('')}
+              </div>
+            </div>
+            
+            <!-- 风险/机会筛选 -->
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-exclamation-circle mr-2"></i>风险/机会
+              </label>
+              <div class="space-y-2 border rounded-lg p-3">
+                <label class="flex items-center">
+                  <input type="checkbox" id="filterHighOpportunity" class="mr-2">
+                  ⭐ 高机会客户
+                </label>
+                <label class="flex items-center">
+                  <input type="checkbox" id="filterHighRisk" class="mr-2">
+                  ⚠️ 高风险客户
+                </label>
+              </div>
+            </div>
+            
+            <!-- 日期筛选 -->
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-calendar mr-2"></i>创建日期
+              </label>
+              <div class="space-y-2">
+                <input 
+                  type="date" 
+                  id="filterDateFrom"
+                  class="w-full px-3 py-2 border rounded-lg text-sm"
+                  placeholder="开始日期"
+                >
+                <input 
+                  type="date" 
+                  id="filterDateTo"
+                  class="w-full px-3 py-2 border rounded-lg text-sm"
+                  placeholder="结束日期"
+                >
+              </div>
+            </div>
+          </div>
+          
+          <div class="flex space-x-3 mt-6">
+            <button 
+              onclick="applyAdvancedSearch()" 
+              class="flex-1 bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition font-medium"
+            >
+              <i class="fas fa-search mr-2"></i>应用筛选
+            </button>
+            <button 
+              onclick="clearAdvancedSearch()" 
+              class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+            >
+              清空条件
+            </button>
+          </div>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+    }
+    
+    // 关闭高级搜索模态框
+    function closeAdvancedSearchModal() {
+      const modal = document.getElementById('advancedSearchModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 应用高级搜索
+    async function applyAdvancedSearch() {
+      const keyword = document.getElementById('filterKeyword')?.value;
+      const stages = Array.from(document.querySelectorAll('.stage-filter:checked')).map(el => el.value);
+      const temperatureLevels = Array.from(document.querySelectorAll('.temp-filter:checked')).map(el => el.value);
+      const tags = Array.from(document.querySelectorAll('.tag-filter:checked')).map(el => parseInt(el.value));
+      const isHighOpportunity = document.getElementById('filterHighOpportunity')?.checked;
+      const isHighRisk = document.getElementById('filterHighRisk')?.checked;
+      const dateFrom = document.getElementById('filterDateFrom')?.value;
+      const dateTo = document.getElementById('filterDateTo')?.value;
+      
+      currentFilters = {
+        userId: currentUser.id,
+        keyword,
+        stages: stages.length > 0 ? stages : undefined,
+        temperatureLevels: temperatureLevels.length > 0 ? temperatureLevels : undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        isHighOpportunity: isHighOpportunity || undefined,
+        isHighRisk: isHighRisk || undefined,
+        dateFrom: dateFrom || undefined,
+        dateTo: dateTo || undefined
+      };
+      
+      try {
+        const res = await axios.post('/api/clients/advanced-search', currentFilters);
+        
+        if (res.data.success) {
+          clientsData = res.data.clients;
+          renderKanban();
+          closeAdvancedSearchModal();
+          
+          const filterCount = [
+            keyword ? 1 : 0,
+            stages.length,
+            temperatureLevels.length,
+            tags.length,
+            isHighOpportunity ? 1 : 0,
+            isHighRisk ? 1 : 0,
+            dateFrom ? 1 : 0,
+            dateTo ? 1 : 0
+          ].reduce((a, b) => a + b, 0);
+          
+          showToast(\`✅ 找到 \${res.data.total} 个客户（应用了 \${filterCount} 个筛选条件）\`, 'success');
+        } else {
+          alert('搜索失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('搜索失败：' + error.message);
+      }
+    }
+    
+    // 清空高级搜索
+    function clearAdvancedSearch() {
+      document.getElementById('filterKeyword').value = '';
+      document.querySelectorAll('.stage-filter, .temp-filter, .tag-filter').forEach(el => el.checked = false);
+      document.getElementById('filterHighOpportunity').checked = false;
+      document.getElementById('filterHighRisk').checked = false;
+      document.getElementById('filterDateFrom').value = '';
+      document.getElementById('filterDateTo').value = '';
     }
 
     // 启动应用
