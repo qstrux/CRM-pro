@@ -417,6 +417,173 @@ app.delete('/api/clients/:id/tags/:tagId', async (c) => {
 });
 
 // ============================================
+// 每日战报 API
+// ============================================
+
+// 提交每日战报
+app.post('/api/daily-reports', async (c) => {
+  const { DB } = c.env;
+  const data = await c.req.json();
+  const userId = data.user_id || '2';
+  
+  // 检查当天是否已提交战报
+  const existingReport = await DB.prepare(`
+    SELECT id FROM daily_reports 
+    WHERE user_id = ? AND report_date = ?
+  `).bind(userId, data.report_date).first();
+  
+  if (existingReport) {
+    // 更新现有战报
+    await DB.prepare(`
+      UPDATE daily_reports SET
+        new_leads = ?,
+        initial_contacts = ?,
+        deep_nurturing = ?,
+        high_intents = ?,
+        joined_groups = ?,
+        opened_accounts = ?,
+        deposited = ?,
+        total_interactions = ?,
+        conversions = ?,
+        notes = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(
+      data.new_leads || 0,
+      data.initial_contacts || 0,
+      data.deep_nurturing || 0,
+      data.high_intents || 0,
+      data.joined_groups || 0,
+      data.opened_accounts || 0,
+      data.deposited || 0,
+      data.total_interactions || 0,
+      data.conversions || 0,
+      data.notes || '',
+      existingReport.id
+    ).run();
+    
+    return c.json({ success: true, reportId: existingReport.id, updated: true });
+  }
+  
+  // 创建新战报
+  const result = await DB.prepare(`
+    INSERT INTO daily_reports (
+      user_id, report_date,
+      new_leads, initial_contacts, deep_nurturing, high_intents,
+      joined_groups, opened_accounts, deposited,
+      total_interactions, conversions, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    userId,
+    data.report_date,
+    data.new_leads || 0,
+    data.initial_contacts || 0,
+    data.deep_nurturing || 0,
+    data.high_intents || 0,
+    data.joined_groups || 0,
+    data.opened_accounts || 0,
+    data.deposited || 0,
+    data.total_interactions || 0,
+    data.conversions || 0,
+    data.notes || ''
+  ).run();
+  
+  return c.json({ success: true, reportId: result.meta.last_row_id });
+});
+
+// 获取每日战报列表
+app.get('/api/daily-reports', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  const startDate = c.req.query('start_date');
+  const endDate = c.req.query('end_date');
+  const limit = c.req.query('limit') || '30';
+  
+  let query = `
+    SELECT * FROM daily_reports 
+    WHERE user_id = ?
+  `;
+  const params: any[] = [userId];
+  
+  if (startDate) {
+    query += ` AND report_date >= ?`;
+    params.push(startDate);
+  }
+  
+  if (endDate) {
+    query += ` AND report_date <= ?`;
+    params.push(endDate);
+  }
+  
+  query += ` ORDER BY report_date DESC LIMIT ?`;
+  params.push(limit);
+  
+  const reports = await DB.prepare(query).bind(...params).all();
+  
+  return c.json({ success: true, reports: reports.results });
+});
+
+// 获取单个战报详情
+app.get('/api/daily-reports/:id', async (c) => {
+  const { DB } = c.env;
+  const reportId = c.req.param('id');
+  
+  const report = await DB.prepare('SELECT * FROM daily_reports WHERE id = ?')
+    .bind(reportId).first();
+  
+  if (!report) {
+    return c.json({ success: false, error: '战报不存在' }, 404);
+  }
+  
+  return c.json({ success: true, report });
+});
+
+// 获取战报统计数据
+app.get('/api/daily-reports/stats/summary', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id') || '2';
+  const days = c.req.query('days') || '7'; // 默认最近7天
+  
+  // 计算日期范围
+  const endDate = new Date().toISOString().split('T')[0];
+  const startDate = new Date(Date.now() - parseInt(days) * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
+  
+  // 获取期间的汇总数据
+  const summary = await DB.prepare(`
+    SELECT 
+      COUNT(*) as total_reports,
+      SUM(new_leads) as total_new_leads,
+      SUM(initial_contacts) as total_initial_contacts,
+      SUM(deep_nurturing) as total_deep_nurturing,
+      SUM(high_intents) as total_high_intents,
+      SUM(joined_groups) as total_joined_groups,
+      SUM(opened_accounts) as total_opened_accounts,
+      SUM(deposited) as total_deposited,
+      SUM(total_interactions) as total_interactions,
+      SUM(conversions) as total_conversions,
+      AVG(new_leads) as avg_new_leads,
+      AVG(total_interactions) as avg_interactions,
+      AVG(conversions) as avg_conversions
+    FROM daily_reports
+    WHERE user_id = ? AND report_date >= ? AND report_date <= ?
+  `).bind(userId, startDate, endDate).first();
+  
+  // 获取今日战报
+  const todayReport = await DB.prepare(`
+    SELECT * FROM daily_reports
+    WHERE user_id = ? AND report_date = ?
+  `).bind(userId, endDate).first();
+  
+  return c.json({
+    success: true,
+    summary,
+    todayReport,
+    dateRange: { startDate, endDate, days: parseInt(days) }
+  });
+});
+
+// ============================================
 // Dashboard API
 // ============================================
 app.get('/api/dashboard', async (c) => {
@@ -710,6 +877,9 @@ app.get('/', (c) => {
           <button onclick="showView('kanban')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-columns mr-2"></i>客户看板
           </button>
+          <button onclick="showView('reports')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
+            <i class="fas fa-file-alt mr-2"></i>每日战报
+          </button>
           <button onclick="showTagsManagement()" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-tags mr-2"></i>标签管理
           </button>
@@ -930,6 +1100,9 @@ app.get('/', (c) => {
         const res = await axios.get('/api/clients');
         clientsData = res.data.clients;
         renderKanban();
+      } else if (view === 'reports') {
+        content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
+        await renderDailyReports();
       }
     }
 
@@ -1062,8 +1235,17 @@ app.get('/', (c) => {
       };
 
       const html = \`
-        <div class="mb-6">
-          <h2 class="text-2xl font-bold text-gray-900">数据仪表盘</h2>
+        <div class="mb-6 flex items-center justify-between">
+          <div>
+            <h2 class="text-2xl font-bold text-gray-900">数据仪表盘</h2>
+            <p class="text-gray-600 mt-1">实时业绩概览</p>
+          </div>
+          <button 
+            onclick="showView('reports')" 
+            class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+          >
+            <i class="fas fa-file-alt mr-2"></i>查看每日战报
+          </button>
         </div>
         
         <!-- KPI 卡片 -->
@@ -1634,6 +1816,538 @@ app.get('/', (c) => {
         alert('创建失败：' + error.message);
       }
     });
+
+    // ============================================
+    // 每日战报功能
+    // ============================================
+    
+    let reportsData = [];
+    let statsData = null;
+    
+    // 渲染每日战报页面
+    async function renderDailyReports() {
+      const content = document.getElementById('mainContent');
+      
+      try {
+        // 获取最近30天的战报
+        const reportsRes = await axios.get('/api/daily-reports', {
+          params: { limit: 30 }
+        });
+        reportsData = reportsRes.data.reports;
+        
+        // 获取统计数据
+        const statsRes = await axios.get('/api/daily-reports/stats/summary', {
+          params: { days: 7 }
+        });
+        statsData = statsRes.data;
+        
+        const html = \`
+          <div class="mb-6 flex items-center justify-between">
+            <div>
+              <h2 class="text-2xl font-bold text-gray-900">每日战报</h2>
+              <p class="text-gray-600 mt-1">记录每日销售成果，跟踪业绩趋势</p>
+            </div>
+            <button 
+              onclick="showSubmitReportModal()" 
+              class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+            >
+              <i class="fas fa-plus mr-2"></i>提交今日战报
+            </button>
+          </div>
+          
+          <!-- 统计卡片 -->
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">本周新客</p>
+                  <p class="text-3xl font-bold text-purple-600">\${statsData.summary?.total_new_leads || 0}</p>
+                  <p class="text-xs text-gray-500 mt-1">日均 \${(statsData.summary?.avg_new_leads || 0).toFixed(1)}</p>
+                </div>
+                <i class="fas fa-user-plus text-4xl text-purple-200"></i>
+              </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">本周互动</p>
+                  <p class="text-3xl font-bold text-blue-600">\${statsData.summary?.total_interactions || 0}</p>
+                  <p class="text-xs text-gray-500 mt-1">日均 \${(statsData.summary?.avg_interactions || 0).toFixed(1)}</p>
+                </div>
+                <i class="fas fa-comments text-4xl text-blue-200"></i>
+              </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">本周转化</p>
+                  <p class="text-3xl font-bold text-green-600">\${statsData.summary?.total_conversions || 0}</p>
+                  <p class="text-xs text-gray-500 mt-1">日均 \${(statsData.summary?.avg_conversions || 0).toFixed(1)}</p>
+                </div>
+                <i class="fas fa-check-circle text-4xl text-green-200"></i>
+              </div>
+            </div>
+            
+            <div class="bg-white rounded-lg shadow-sm p-6">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-gray-600 text-sm">已入金客户</p>
+                  <p class="text-3xl font-bold text-orange-600">\${statsData.summary?.total_deposited || 0}</p>
+                  <p class="text-xs text-gray-500 mt-1">最终目标</p>
+                </div>
+                <i class="fas fa-money-bill-wave text-4xl text-orange-200"></i>
+              </div>
+            </div>
+          </div>
+          
+          <!-- 今日战报快捷卡片 -->
+          \${statsData.todayReport ? \`
+            <div class="bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg shadow-lg p-6 mb-8 text-white">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-xl font-bold">
+                  <i class="fas fa-calendar-day mr-2"></i>今日战报
+                </h3>
+                <span class="text-sm opacity-90">\${statsData.todayReport.report_date}</span>
+              </div>
+              <div class="grid grid-cols-4 gap-4">
+                <div class="text-center">
+                  <p class="text-2xl font-bold">\${statsData.todayReport.new_leads}</p>
+                  <p class="text-sm opacity-80">新接粉</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-2xl font-bold">\${statsData.todayReport.total_interactions}</p>
+                  <p class="text-sm opacity-80">总互动</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-2xl font-bold">\${statsData.todayReport.conversions}</p>
+                  <p class="text-sm opacity-80">转化数</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-2xl font-bold">\${statsData.todayReport.deposited}</p>
+                  <p class="text-sm opacity-80">入金数</p>
+                </div>
+              </div>
+              \${statsData.todayReport.notes ? \`
+                <div class="mt-4 pt-4 border-t border-white border-opacity-20">
+                  <p class="text-sm opacity-90"><strong>备注：</strong>\${statsData.todayReport.notes}</p>
+                </div>
+              \` : ''}
+            </div>
+          \` : \`
+            <div class="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 mb-8 text-center">
+              <i class="fas fa-exclamation-circle text-3xl text-yellow-600 mb-3"></i>
+              <p class="text-yellow-800 font-medium">今日还未提交战报</p>
+              <button 
+                onclick="showSubmitReportModal()" 
+                class="mt-3 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700"
+              >
+                立即提交
+              </button>
+            </div>
+          \`}
+          
+          <!-- 历史战报列表 -->
+          <div class="bg-white rounded-lg shadow-sm p-6">
+            <h3 class="text-xl font-bold text-gray-900 mb-4">
+              <i class="fas fa-history mr-2"></i>历史战报
+            </h3>
+            
+            \${reportsData.length === 0 ? \`
+              <div class="text-center py-12 text-gray-500">
+                <i class="fas fa-inbox text-5xl mb-4"></i>
+                <p>暂无战报记录</p>
+              </div>
+            \` : \`
+              <div class="overflow-x-auto">
+                <table class="w-full">
+                  <thead class="bg-gray-50">
+                    <tr>
+                      <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">日期</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">新接粉</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">初步破冰</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">深度培育</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">高意向</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">已进群</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">已开户</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">已入金</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">总互动</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">转化</th>
+                      <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    \${reportsData.map(report => \`
+                      <tr class="hover:bg-gray-50 transition">
+                        <td class="px-4 py-3 text-sm font-medium text-gray-900">\${report.report_date}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.new_leads}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.initial_contacts}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.deep_nurturing}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.high_intents}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.joined_groups}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700">\${report.opened_accounts}</td>
+                        <td class="px-4 py-3 text-center text-sm text-gray-700 font-bold text-green-600">\${report.deposited}</td>
+                        <td class="px-4 py-3 text-center text-sm text-blue-600 font-medium">\${report.total_interactions}</td>
+                        <td class="px-4 py-3 text-center text-sm text-purple-600 font-medium">\${report.conversions}</td>
+                        <td class="px-4 py-3 text-center">
+                          <button 
+                            onclick="viewReportDetail(\${report.id})" 
+                            class="text-blue-600 hover:text-blue-800"
+                            title="查看详情"
+                          >
+                            <i class="fas fa-eye"></i>
+                          </button>
+                        </td>
+                      </tr>
+                    \`).join('')}
+                  </tbody>
+                </table>
+              </div>
+            \`}
+          </div>
+        \`;
+        
+        content.innerHTML = html;
+        
+      } catch (error) {
+        console.error('加载战报失败:', error);
+        content.innerHTML = '<div class="text-center py-20 text-red-600">加载失败</div>';
+      }
+    }
+    
+    // 显示提交战报模态框
+    function showSubmitReportModal() {
+      const today = new Date().toISOString().split('T')[0];
+      
+      // 检查今日是否已提交
+      const todayReport = statsData?.todayReport;
+      
+      const modal = document.createElement('div');
+      modal.id = 'submitReportModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">
+              <i class="fas fa-file-alt mr-2 text-blue-600"></i>
+              \${todayReport ? '编辑今日战报' : '提交今日战报'}
+            </h2>
+            <button onclick="closeSubmitReportModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <form id="submitReportForm" class="space-y-6">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">日期</label>
+              <input 
+                type="date" 
+                name="report_date" 
+                value="\${todayReport?.report_date || today}"
+                required 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              >
+            </div>
+            
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-user-plus text-purple-600 mr-1"></i>新接粉
+                </label>
+                <input 
+                  type="number" 
+                  name="new_leads" 
+                  value="\${todayReport?.new_leads || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-handshake text-blue-600 mr-1"></i>初步破冰
+                </label>
+                <input 
+                  type="number" 
+                  name="initial_contacts" 
+                  value="\${todayReport?.initial_contacts || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-seedling text-green-600 mr-1"></i>深度培育
+                </label>
+                <input 
+                  type="number" 
+                  name="deep_nurturing" 
+                  value="\${todayReport?.deep_nurturing || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-fire text-orange-600 mr-1"></i>高意向
+                </label>
+                <input 
+                  type="number" 
+                  name="high_intents" 
+                  value="\${todayReport?.high_intents || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-users text-teal-600 mr-1"></i>已进群
+                </label>
+                <input 
+                  type="number" 
+                  name="joined_groups" 
+                  value="\${todayReport?.joined_groups || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-id-card text-indigo-600 mr-1"></i>已开户
+                </label>
+                <input 
+                  type="number" 
+                  name="opened_accounts" 
+                  value="\${todayReport?.opened_accounts || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-money-bill-wave text-green-600 mr-1"></i>已入金
+                </label>
+                <input 
+                  type="number" 
+                  name="deposited" 
+                  value="\${todayReport?.deposited || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+              
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  <i class="fas fa-exchange-alt text-purple-600 mr-1"></i>转化数
+                </label>
+                <input 
+                  type="number" 
+                  name="conversions" 
+                  value="\${todayReport?.conversions || 0}"
+                  min="0" 
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+              </div>
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-comments text-blue-600 mr-1"></i>总互动次数
+              </label>
+              <input 
+                type="number" 
+                name="total_interactions" 
+                value="\${todayReport?.total_interactions || 0}"
+                min="0" 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              >
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                <i class="fas fa-sticky-note text-yellow-600 mr-1"></i>备注
+              </label>
+              <textarea 
+                name="notes" 
+                rows="4" 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="记录今日重要事项、心得体会、明日计划等..."
+              >\${todayReport?.notes || ''}</textarea>
+            </div>
+            
+            <div class="flex space-x-3">
+              <button 
+                type="submit" 
+                class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-medium transition"
+              >
+                <i class="fas fa-check mr-2"></i>\${todayReport ? '更新战报' : '提交战报'}
+              </button>
+              <button 
+                type="button" 
+                onclick="closeSubmitReportModal()" 
+                class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition"
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+      
+      // 绑定表单提交事件
+      document.getElementById('submitReportForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+        
+        try {
+          const res = await axios.post('/api/daily-reports', data);
+          
+          if (res.data.success) {
+            alert(res.data.updated ? '战报更新成功！' : '战报提交成功！');
+            closeSubmitReportModal();
+            await renderDailyReports();
+          }
+        } catch (error) {
+          alert('提交失败：' + (error.response?.data?.error || error.message));
+        }
+      });
+    }
+    
+    // 关闭提交战报模态框
+    function closeSubmitReportModal() {
+      const modal = document.getElementById('submitReportModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 查看战报详情
+    async function viewReportDetail(reportId) {
+      try {
+        const res = await axios.get(\`/api/daily-reports/\${reportId}\`);
+        const report = res.data.report;
+        
+        const modal = document.createElement('div');
+        modal.id = 'reportDetailModal';
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = \`
+          <div class="bg-white rounded-lg p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+              <h2 class="text-2xl font-bold text-gray-900">
+                <i class="fas fa-file-alt mr-2 text-blue-600"></i>
+                战报详情 - \${report.report_date}
+              </h2>
+              <button onclick="closeReportDetailModal()" class="text-gray-500 hover:text-gray-700">
+                <i class="fas fa-times text-2xl"></i>
+              </button>
+            </div>
+            
+            <div class="space-y-6">
+              <!-- 漏斗各阶段数据 -->
+              <div>
+                <h3 class="text-lg font-semibold text-gray-900 mb-4">销售漏斗数据</h3>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div class="bg-purple-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-purple-600">\${report.new_leads}</p>
+                    <p class="text-sm text-gray-600 mt-1">新接粉</p>
+                  </div>
+                  <div class="bg-blue-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-blue-600">\${report.initial_contacts}</p>
+                    <p class="text-sm text-gray-600 mt-1">初步破冰</p>
+                  </div>
+                  <div class="bg-green-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-green-600">\${report.deep_nurturing}</p>
+                    <p class="text-sm text-gray-600 mt-1">深度培育</p>
+                  </div>
+                  <div class="bg-orange-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-orange-600">\${report.high_intents}</p>
+                    <p class="text-sm text-gray-600 mt-1">高意向</p>
+                  </div>
+                  <div class="bg-teal-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-teal-600">\${report.joined_groups}</p>
+                    <p class="text-sm text-gray-600 mt-1">已进群</p>
+                  </div>
+                  <div class="bg-indigo-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-indigo-600">\${report.opened_accounts}</p>
+                    <p class="text-sm text-gray-600 mt-1">已开户</p>
+                  </div>
+                  <div class="bg-green-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-green-600">\${report.deposited}</p>
+                    <p class="text-sm text-gray-600 mt-1">已入金</p>
+                  </div>
+                  <div class="bg-purple-50 rounded-lg p-4 text-center">
+                    <p class="text-3xl font-bold text-purple-600">\${report.conversions}</p>
+                    <p class="text-sm text-gray-600 mt-1">转化数</p>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- 互动数据 -->
+              <div>
+                <h3 class="text-lg font-semibold text-gray-900 mb-4">互动数据</h3>
+                <div class="bg-blue-50 rounded-lg p-6">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <p class="text-gray-600">总互动次数</p>
+                      <p class="text-4xl font-bold text-blue-600">\${report.total_interactions}</p>
+                    </div>
+                    <i class="fas fa-comments text-6xl text-blue-200"></i>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- 备注 -->
+              \${report.notes ? \`
+                <div>
+                  <h3 class="text-lg font-semibold text-gray-900 mb-4">备注</h3>
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <p class="text-gray-700 whitespace-pre-wrap">\${report.notes}</p>
+                  </div>
+                </div>
+              \` : ''}
+              
+              <!-- 时间信息 -->
+              <div class="text-sm text-gray-500 pt-4 border-t">
+                <p>提交时间：\${new Date(report.created_at).toLocaleString('zh-CN')}</p>
+                \${report.updated_at !== report.created_at ? 
+                  \`<p>更新时间：\${new Date(report.updated_at).toLocaleString('zh-CN')}</p>\` : ''}
+              </div>
+            </div>
+            
+            <div class="mt-6">
+              <button 
+                onclick="closeReportDetailModal()" 
+                class="w-full bg-gray-300 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-400 transition"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        \`;
+        
+        document.body.appendChild(modal);
+        
+      } catch (error) {
+        alert('加载失败：' + error.message);
+      }
+    }
+    
+    // 关闭战报详情模态框
+    function closeReportDetailModal() {
+      const modal = document.getElementById('reportDetailModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
 
     // 启动应用
     initApp();
