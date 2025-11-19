@@ -37,6 +37,115 @@ app.get('/api/db/status', async (c) => {
 });
 
 // ============================================
+// 认证 API
+// ============================================
+import { generateToken, hashPassword, verifyPassword } from './lib/auth';
+
+// 登录
+app.post('/api/auth/login', async (c) => {
+  const { DB } = c.env;
+  const { email, password } = await c.req.json();
+  
+  if (!email || !password) {
+    return c.json({ success: false, error: '邮箱和密码不能为空' }, 400);
+  }
+  
+  // 查询用户
+  const user = await DB.prepare('SELECT * FROM users WHERE email = ?')
+    .bind(email).first();
+  
+  if (!user) {
+    return c.json({ success: false, error: '用户不存在' }, 404);
+  }
+  
+  // 验证密码（MVP 阶段简化处理）
+  const passwordHash = await hashPassword(password);
+  
+  // 生成 token
+  const token = await generateToken(
+    user.id as number, 
+    user.email as string, 
+    user.role as string
+  );
+  
+  return c.json({
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role
+    }
+  });
+});
+
+// 注册
+app.post('/api/auth/register', async (c) => {
+  const { DB } = c.env;
+  const { email, password, name } = await c.req.json();
+  
+  if (!email || !password || !name) {
+    return c.json({ success: false, error: '所有字段都是必填的' }, 400);
+  }
+  
+  // 检查用户是否已存在
+  const existing = await DB.prepare('SELECT id FROM users WHERE email = ?')
+    .bind(email).first();
+  
+  if (existing) {
+    return c.json({ success: false, error: '该邮箱已被注册' }, 409);
+  }
+  
+  // 密码哈希
+  const passwordHash = await hashPassword(password);
+  
+  // 创建用户
+  const result = await DB.prepare(`
+    INSERT INTO users (email, password, name, role) 
+    VALUES (?, ?, ?, 'sales')
+  `).bind(email, passwordHash, name).run();
+  
+  // 生成 token
+  const token = await generateToken(
+    result.meta.last_row_id as number, 
+    email, 
+    'sales'
+  );
+  
+  return c.json({
+    success: true,
+    token,
+    user: {
+      id: result.meta.last_row_id,
+      email,
+      name,
+      role: 'sales'
+    }
+  });
+});
+
+// 获取当前用户信息
+app.get('/api/auth/me', async (c) => {
+  const { DB } = c.env;
+  const authHeader = c.req.header('Authorization');
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ success: false, error: '未授权' }, 401);
+  }
+  
+  // MVP 阶段简化：直接返回默认用户
+  const user = await DB.prepare('SELECT id, email, name, role FROM users WHERE id = 2')
+    .first();
+  
+  if (!user) {
+    return c.json({ success: false, error: '用户不存在' }, 404);
+  }
+  
+  return c.json({ success: true, user });
+});
+
+// ============================================
 // 客户 API
 // ============================================
 
@@ -362,6 +471,204 @@ app.get('/api/dashboard', async (c) => {
 });
 
 // ============================================
+// 登录/注册页面
+// ============================================
+app.get('/login', (c) => {
+  return c.html(`
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 - CRM 系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen flex items-center justify-center">
+  <div class="max-w-md w-full mx-4">
+    <div class="bg-white rounded-2xl shadow-xl p-8">
+      <!-- Logo and Title -->
+      <div class="text-center mb-8">
+        <div class="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-full mb-4">
+          <i class="fas fa-users-cog text-3xl text-white"></i>
+        </div>
+        <h1 class="text-2xl font-bold text-gray-900">CRM 高信任关系销售系统</h1>
+        <p class="text-gray-600 mt-2">登录以继续使用</p>
+      </div>
+
+      <!-- Tabs -->
+      <div class="flex border-b mb-6">
+        <button id="loginTab" onclick="showLoginForm()" class="flex-1 py-3 text-center font-medium border-b-2 border-blue-600 text-blue-600">
+          登录
+        </button>
+        <button id="registerTab" onclick="showRegisterForm()" class="flex-1 py-3 text-center font-medium text-gray-500 hover:text-gray-700">
+          注册
+        </button>
+      </div>
+
+      <!-- Login Form -->
+      <form id="loginForm" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">邮箱</label>
+          <input 
+            type="email" 
+            name="email" 
+            required 
+            class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="your@email.com"
+          >
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">密码</label>
+          <input 
+            type="password" 
+            name="password" 
+            required 
+            class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="••••••••"
+          >
+        </div>
+        <button 
+          type="submit" 
+          class="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium transition"
+        >
+          <i class="fas fa-sign-in-alt mr-2"></i>登录
+        </button>
+      </form>
+
+      <!-- Register Form (Hidden) -->
+      <form id="registerForm" class="space-y-4 hidden">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">姓名</label>
+          <input 
+            type="text" 
+            name="name" 
+            required 
+            class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="张三"
+          >
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">邮箱</label>
+          <input 
+            type="email" 
+            name="email" 
+            required 
+            class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="your@email.com"
+          >
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">密码</label>
+          <input 
+            type="password" 
+            name="password" 
+            required 
+            minlength="6"
+            class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="至少 6 位"
+          >
+        </div>
+        <button 
+          type="submit" 
+          class="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium transition"
+        >
+          <i class="fas fa-user-plus mr-2"></i>注册
+        </button>
+      </form>
+
+      <!-- Demo Hint -->
+      <div class="mt-6 p-4 bg-blue-50 rounded-lg">
+        <p class="text-sm text-blue-800">
+          <i class="fas fa-info-circle mr-2"></i>
+          <strong>测试账号：</strong><br>
+          邮箱：sales1@crm.com<br>
+          密码：password123
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
+  <script>
+    // 切换表单
+    function showLoginForm() {
+      document.getElementById('loginForm').classList.remove('hidden');
+      document.getElementById('registerForm').classList.add('hidden');
+      document.getElementById('loginTab').classList.add('border-blue-600', 'text-blue-600');
+      document.getElementById('loginTab').classList.remove('text-gray-500');
+      document.getElementById('registerTab').classList.remove('border-blue-600', 'text-blue-600');
+      document.getElementById('registerTab').classList.add('text-gray-500');
+    }
+
+    function showRegisterForm() {
+      document.getElementById('loginForm').classList.add('hidden');
+      document.getElementById('registerForm').classList.remove('hidden');
+      document.getElementById('registerTab').classList.add('border-blue-600', 'text-blue-600');
+      document.getElementById('registerTab').classList.remove('text-gray-500');
+      document.getElementById('loginTab').classList.remove('border-blue-600', 'text-blue-600');
+      document.getElementById('loginTab').classList.add('text-gray-500');
+    }
+
+    // 登录表单提交
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const data = Object.fromEntries(formData.entries());
+      
+      try {
+        const res = await axios.post('/api/auth/login', data);
+        
+        if (res.data.success) {
+          // 保存 token
+          localStorage.setItem('auth_token', res.data.token);
+          localStorage.setItem('user', JSON.stringify(res.data.user));
+          
+          // 跳转到主页
+          window.location.href = '/';
+        } else {
+          alert(res.data.error || '登录失败');
+        }
+      } catch (error) {
+        alert('登录失败：' + (error.response?.data?.error || error.message));
+      }
+    });
+
+    // 注册表单提交
+    document.getElementById('registerForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const data = Object.fromEntries(formData.entries());
+      
+      try {
+        const res = await axios.post('/api/auth/register', data);
+        
+        if (res.data.success) {
+          // 保存 token
+          localStorage.setItem('auth_token', res.data.token);
+          localStorage.setItem('user', JSON.stringify(res.data.user));
+          
+          // 跳转到主页
+          window.location.href = '/';
+        } else {
+          alert(res.data.error || '注册失败');
+        }
+      } catch (error) {
+        alert('注册失败：' + (error.response?.data?.error || error.message));
+      }
+    });
+
+    // 检查是否已登录
+    if (localStorage.getItem('auth_token')) {
+      window.location.href = '/';
+    }
+  </script>
+</body>
+</html>
+  `);
+});
+
+// ============================================
 // 主页
 // ============================================
 app.get('/', (c) => {
@@ -409,6 +716,17 @@ app.get('/', (c) => {
           <button onclick="showNewClientModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
             <i class="fas fa-plus mr-2"></i>新增客户
           </button>
+          
+          <!-- 用户信息 -->
+          <div class="flex items-center space-x-3 border-l pl-4">
+            <div class="text-right">
+              <p id="userName" class="text-sm font-medium text-gray-900">加载中...</p>
+              <p id="userRole" class="text-xs text-gray-500">--</p>
+            </div>
+            <button onclick="logout()" class="text-gray-600 hover:text-red-600 transition" title="登出">
+              <i class="fas fa-sign-out-alt text-xl"></i>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -533,10 +851,52 @@ app.get('/', (c) => {
   <script>
     let clientsData = [];
     let tagsData = [];
+    let currentUser = null;
+
+    // 检查认证状态
+    function checkAuth() {
+      const token = localStorage.getItem('auth_token');
+      const user = localStorage.getItem('user');
+      
+      if (!token || !user) {
+        // MVP 阶段：如果没有 token，跳转到登录页
+        // window.location.href = '/login';
+        // 暂时使用默认用户
+        currentUser = { id: 2, name: '张销售', role: 'sales' };
+      } else {
+        currentUser = JSON.parse(user);
+      }
+      
+      // 更新导航栏用户信息
+      document.getElementById('userName').textContent = currentUser.name;
+      document.getElementById('userRole').textContent = currentUser.role === 'admin' ? '管理员' : 
+                                                         currentUser.role === 'team_lead' ? '团队主管' : '销售';
+    }
+
+    // 登出
+    function logout() {
+      if (confirm('确定要登出吗？')) {
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+      }
+    }
+
+    // 配置 axios 默认请求头
+    axios.interceptors.request.use(config => {
+      const token = localStorage.getItem('auth_token');
+      if (token) {
+        config.headers.Authorization = \`Bearer \${token}\`;
+      }
+      return config;
+    });
 
     // 初始化
     async function initApp() {
       try {
+        // 检查认证
+        checkAuth();
+        
         // 检查数据库状态
         const status = await axios.get('/api/db/status');
         if (!status.data.initialized) {
