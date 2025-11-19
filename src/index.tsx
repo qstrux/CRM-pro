@@ -2410,7 +2410,12 @@ app.get('/', (c) => {
                       \${stageClients.length}
                     </span>
                   </div>
-                  <div class="space-y-3">
+                  <div class="space-y-3 min-h-[200px]" 
+                       data-stage="\${stage.key}"
+                       ondrop="handleDrop(event)" 
+                       ondragover="handleDragOver(event)"
+                       ondragenter="handleDragEnter(event)"
+                       ondragleave="handleDragLeave(event)">
                     \${stageClients.map(client => renderClientCard(client)).join('')}
                   </div>
                 </div>
@@ -2434,10 +2439,19 @@ app.get('/', (c) => {
       }[client.temperature_level];
 
       return \`
-        <div class="client-card \${tempClass} bg-white border rounded-lg p-3 cursor-pointer" 
-             onclick="viewClientDetail(\${client.id})">
+        <div class="client-card \${tempClass} bg-white border rounded-lg p-3 cursor-move" 
+             draggable="true"
+             data-client-id="\${client.id}"
+             data-client-name="\${client.name}"
+             data-current-stage="\${client.stage}"
+             ondragstart="handleDragStart(event)"
+             ondragend="handleDragEnd(event)"
+             onclick="event.stopPropagation(); viewClientDetail(\${client.id})">
           <div class="flex items-start justify-between mb-2">
-            <h3 class="font-semibold text-gray-900">\${client.name}</h3>
+            <div class="flex items-center">
+              <i class="fas fa-grip-vertical text-gray-400 mr-2 text-xs"></i>
+              <h3 class="font-semibold text-gray-900">\${client.name}</h3>
+            </div>
             <i class="fas \${tempIcon}"></i>
           </div>
           <div class="text-sm text-gray-600 space-y-1">
@@ -5346,6 +5360,140 @@ app.get('/', (c) => {
     
     // 启动定时任务
     scheduleRiskOpportunityAssessment();
+
+    // ============================================
+    // 拖拽式看板功能
+    // ============================================
+    
+    let draggedClientId = null;
+    let draggedClientName = null;
+    let draggedFromStage = null;
+    
+    // 开始拖拽
+    function handleDragStart(e) {
+      const card = e.target.closest('.client-card');
+      if (!card) return;
+      
+      draggedClientId = parseInt(card.dataset.clientId);
+      draggedClientName = card.dataset.clientName;
+      draggedFromStage = card.dataset.currentStage;
+      
+      // 添加拖拽样式
+      card.classList.add('opacity-50');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/html', card.innerHTML);
+    }
+    
+    // 拖拽结束
+    function handleDragEnd(e) {
+      const card = e.target.closest('.client-card');
+      if (card) {
+        card.classList.remove('opacity-50');
+      }
+      
+      // 清除所有 over 样式
+      document.querySelectorAll('.stage-column > div > div').forEach(col => {
+        col.classList.remove('bg-blue-50', 'border-blue-300', 'border-2', 'border-dashed');
+      });
+    }
+    
+    // 拖拽进入目标区域
+    function handleDragEnter(e) {
+      e.preventDefault();
+      const dropZone = e.target.closest('[data-stage]');
+      if (dropZone) {
+        dropZone.classList.add('bg-blue-50', 'border-blue-300', 'border-2', 'border-dashed');
+      }
+    }
+    
+    // 拖拽离开目标区域
+    function handleDragLeave(e) {
+      const dropZone = e.target.closest('[data-stage]');
+      if (dropZone && !dropZone.contains(e.relatedTarget)) {
+        dropZone.classList.remove('bg-blue-50', 'border-blue-300', 'border-2', 'border-dashed');
+      }
+    }
+    
+    // 在目标区域上方拖拽
+    function handleDragOver(e) {
+      e.preventDefault();
+      e.dataTransfer.dropOver = 'move';
+    }
+    
+    // 放下到目标区域
+    async function handleDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const dropZone = e.target.closest('[data-stage]');
+      if (!dropZone) return;
+      
+      const newStage = dropZone.dataset.stage;
+      
+      // 清除高亮
+      dropZone.classList.remove('bg-blue-50', 'border-blue-300', 'border-2', 'border-dashed');
+      
+      // 如果是同一阶段，不执行任何操作
+      if (newStage === draggedFromStage) {
+        return;
+      }
+      
+      const stageNames = {
+        'new_lead': '新接粉',
+        'initial_contact': '初步破冰',
+        'nurturing': '深度培育',
+        'high_intent': '高意向',
+        'joined_group': '已进群',
+        'opened_account': '已开户',
+        'deposited': '已入金'
+      };
+      
+      // 确认更新
+      if (!confirm(\`确定将客户「\${draggedClientName}」从「\${stageNames[draggedFromStage]}」移动到「\${stageNames[newStage]}」吗？\`)) {
+        return;
+      }
+      
+      try {
+        // 更新阶段
+        const res = await axios.put(\`/api/clients/\${draggedClientId}/stage\`, {
+          stage: newStage,
+          userId: currentUser.id
+        });
+        
+        if (res.data.success) {
+          // 刷新看板
+          await loadClients();
+          renderKanban();
+          
+          // 显示成功提示
+          showToast(\`✅ 客户「\${draggedClientName}」已移动到「\${stageNames[newStage]}」\`, 'success');
+        } else {
+          alert('更新失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('更新失败：' + error.message);
+      }
+    }
+    
+    // Toast 提示
+    function showToast(message, type = 'info') {
+      const colors = {
+        success: 'bg-green-500',
+        error: 'bg-red-500',
+        info: 'bg-blue-500'
+      };
+      
+      const toast = document.createElement('div');
+      toast.className = \`fixed bottom-8 right-8 \${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg z-50 transition-opacity duration-300\`;
+      toast.textContent = message;
+      
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
 
     // 启动应用
     initApp();
