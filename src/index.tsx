@@ -1265,6 +1265,147 @@ app.get('/api/dashboard', async (c) => {
 });
 
 // ============================================
+// 自动提醒系统 API
+// ============================================
+
+// 检测并创建48小时未互动提醒
+app.post('/api/alerts/check-overdue', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  // 查找48小时未互动的客户（排除已归档）
+  const overdueClients = await DB.prepare(`
+    SELECT 
+      c.id,
+      c.name,
+      c.stage,
+      c.last_interaction_at,
+      CAST((julianday('now') - julianday(c.last_interaction_at)) * 24 AS INTEGER) as hours_since_interaction
+    FROM clients c
+    WHERE c.user_id = ?
+      AND c.is_archived = 0
+      AND c.last_interaction_at IS NOT NULL
+      AND julianday('now') - julianday(c.last_interaction_at) >= 2.0
+      AND NOT EXISTS (
+        SELECT 1 FROM system_alerts sa
+        WHERE sa.client_id = c.id
+          AND sa.alert_type = 'interaction_overdue'
+          AND sa.is_read = 0
+          AND DATE(sa.created_at) = DATE('now')
+      )
+  `).bind(userId).all();
+  
+  let createdCount = 0;
+  
+  // 为每个超期客户创建提醒
+  for (const client of overdueClients.results || []) {
+    const message = `客户「${client.name}」已 ${client.hours_since_interaction} 小时未互动，请尽快跟进！`;
+    
+    await DB.prepare(`
+      INSERT INTO system_alerts (user_id, client_id, alert_type, priority, message)
+      VALUES (?, ?, 'interaction_overdue', 'high', ?)
+    `).bind(userId, client.id, message).run();
+    
+    // 同时更新客户为高风险
+    await DB.prepare(`
+      UPDATE clients 
+      SET is_high_risk = 1,
+          risk_notes = '48小时未互动，流失风险'
+      WHERE id = ?
+    `).bind(client.id).run();
+    
+    createdCount++;
+  }
+  
+  return c.json({
+    success: true,
+    checked: overdueClients.results?.length || 0,
+    created: createdCount,
+    message: `检测完成，创建了 ${createdCount} 条提醒`
+  });
+});
+
+// 获取当前用户的所有提醒
+app.get('/api/alerts', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  const unreadOnly = c.req.query('unread_only') === 'true';
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  let query = `
+    SELECT 
+      sa.*,
+      c.name as client_name,
+      c.stage as client_stage
+    FROM system_alerts sa
+    LEFT JOIN clients c ON sa.client_id = c.id
+    WHERE sa.user_id = ?
+  `;
+  
+  if (unreadOnly) {
+    query += ` AND sa.is_read = 0`;
+  }
+  
+  query += ` ORDER BY sa.created_at DESC LIMIT 100`;
+  
+  const alerts = await DB.prepare(query).bind(userId).all();
+  
+  return c.json({
+    success: true,
+    alerts: alerts.results || []
+  });
+});
+
+// 标记提醒为已读
+app.put('/api/alerts/:id/read', async (c) => {
+  const { DB } = c.env;
+  const alertId = c.req.param('id');
+  
+  await DB.prepare(`
+    UPDATE system_alerts 
+    SET is_read = 1, read_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(alertId).run();
+  
+  return c.json({ success: true });
+});
+
+// 批量标记为已读
+app.post('/api/alerts/mark-all-read', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  await DB.prepare(`
+    UPDATE system_alerts 
+    SET is_read = 1, read_at = CURRENT_TIMESTAMP
+    WHERE user_id = ? AND is_read = 0
+  `).bind(userId).run();
+  
+  return c.json({ success: true });
+});
+
+// 删除提醒
+app.delete('/api/alerts/:id', async (c) => {
+  const { DB } = c.env;
+  const alertId = c.req.param('id');
+  
+  await DB.prepare(`DELETE FROM system_alerts WHERE id = ?`).bind(alertId).run();
+  
+  return c.json({ success: true });
+});
+
+// ============================================
 // 登录/注册页面
 // ============================================
 app.get('/login', (c) => {
@@ -1516,6 +1657,13 @@ app.get('/', (c) => {
           <button onclick="showTagsManagement()" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-tags mr-2"></i>标签管理
           </button>
+          
+          <!-- 提醒铃铛 -->
+          <button onclick="showAlertsPanel()" class="relative px-4 py-2 text-gray-700 hover:text-blue-600 transition">
+            <i class="fas fa-bell text-xl"></i>
+            <span id="alertsBadge" class="hidden absolute top-0 right-0 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">0</span>
+          </button>
+          
           <button onclick="showNewClientModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
             <i class="fas fa-plus mr-2"></i>新增客户
           </button>
@@ -4279,6 +4427,247 @@ app.get('/', (c) => {
         modal.remove();
       }
     }
+
+    // ============================================
+    // 自动提醒系统功能
+    // ============================================
+    
+    let alertsData = [];
+    let unreadCount = 0;
+    
+    // 加载提醒数据
+    async function loadAlerts(unreadOnly = false) {
+      try {
+        const res = await axios.get(\`/api/alerts?user_id=\${currentUser.id}&unread_only=\${unreadOnly}\`);
+        if (res.data.success) {
+          alertsData = res.data.alerts;
+          updateAlertsBadge();
+        }
+      } catch (error) {
+        console.error('加载提醒失败:', error);
+      }
+    }
+    
+    // 更新提醒徽章
+    function updateAlertsBadge() {
+      unreadCount = alertsData.filter(a => a.is_read === 0).length;
+      const badge = document.getElementById('alertsBadge');
+      if (badge) {
+        if (unreadCount > 0) {
+          badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      }
+    }
+    
+    // 检测超期客户并创建提醒
+    async function checkOverdueClients() {
+      try {
+        const res = await axios.post(\`/api/alerts/check-overdue?user_id=\${currentUser.id}\`);
+        if (res.data.success && res.data.created > 0) {
+          console.log(\`创建了 \${res.data.created} 条新提醒\`);
+          await loadAlerts();
+        }
+      } catch (error) {
+        console.error('检测超期客户失败:', error);
+      }
+    }
+    
+    // 显示提醒面板
+    async function showAlertsPanel() {
+      await loadAlerts();
+      
+      const panel = document.createElement('div');
+      panel.id = 'alertsPanel';
+      panel.className = 'fixed right-4 top-20 w-96 bg-white rounded-lg shadow-2xl z-50 max-h-[80vh] flex flex-col';
+      panel.innerHTML = \`
+        <div class="p-4 border-b flex items-center justify-between bg-blue-50">
+          <h3 class="text-lg font-bold text-gray-900">
+            <i class="fas fa-bell mr-2 text-blue-600"></i>
+            系统提醒
+            <span class="ml-2 text-sm text-gray-600">(\${unreadCount} 未读)</span>
+          </h3>
+          <div class="flex items-center space-x-2">
+            <button onclick="markAllRead()" class="text-sm text-blue-600 hover:underline">
+              全部标记已读
+            </button>
+            <button onclick="closeAlertsPanel()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+        </div>
+        
+        <div class="overflow-y-auto flex-1">
+          \${alertsData.length === 0 ? \`
+            <div class="p-8 text-center text-gray-500">
+              <i class="fas fa-inbox text-4xl mb-4"></i>
+              <p>暂无提醒</p>
+            </div>
+          \` : alertsData.map(alert => \`
+            <div class="p-4 border-b hover:bg-gray-50 cursor-pointer \${alert.is_read === 0 ? 'bg-blue-50' : ''}" onclick="handleAlertClick(\${alert.id}, \${alert.client_id})">
+              <div class="flex items-start justify-between">
+                <div class="flex-1">
+                  <div class="flex items-center mb-2">
+                    <span class="\${getPriorityClass(alert.priority)} px-2 py-1 rounded text-xs font-medium mr-2">
+                      \${getPriorityText(alert.priority)}
+                    </span>
+                    <span class="text-xs text-gray-500">
+                      \${getAlertTypeIcon(alert.alert_type)} \${getAlertTypeText(alert.alert_type)}
+                    </span>
+                  </div>
+                  <p class="text-sm text-gray-900 mb-1">\${alert.message}</p>
+                  <div class="flex items-center text-xs text-gray-500">
+                    <i class="fas fa-clock mr-1"></i>
+                    \${formatTime(alert.created_at)}
+                    \${alert.client_name ? \` · <i class="fas fa-user ml-2 mr-1"></i>\${alert.client_name}\` : ''}
+                  </div>
+                </div>
+                <button onclick="event.stopPropagation(); deleteAlert(\${alert.id})" class="text-gray-400 hover:text-red-600 ml-2">
+                  <i class="fas fa-trash text-sm"></i>
+                </button>
+              </div>
+            </div>
+          \`).join('')}
+        </div>
+        
+        <div class="p-4 border-t bg-gray-50">
+          <button onclick="refreshAlerts()" class="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
+            <i class="fas fa-sync-alt mr-2"></i>刷新提醒
+          </button>
+        </div>
+      \`;
+      
+      document.body.appendChild(panel);
+      
+      // 点击外部关闭
+      setTimeout(() => {
+        document.addEventListener('click', function closeOnClickOutside(e) {
+          const panel = document.getElementById('alertsPanel');
+          if (panel && !panel.contains(e.target) && !e.target.closest('button[onclick*="showAlertsPanel"]')) {
+            closeAlertsPanel();
+            document.removeEventListener('click', closeOnClickOutside);
+          }
+        });
+      }, 100);
+    }
+    
+    // 关闭提醒面板
+    function closeAlertsPanel() {
+      const panel = document.getElementById('alertsPanel');
+      if (panel) {
+        panel.remove();
+      }
+    }
+    
+    // 处理提醒点击
+    async function handleAlertClick(alertId, clientId) {
+      // 标记为已读
+      await axios.put(\`/api/alerts/\${alertId}/read\`);
+      await loadAlerts();
+      closeAlertsPanel();
+      
+      // 如果有关联客户，跳转到客户详情
+      if (clientId) {
+        showClientDetail(clientId);
+      }
+    }
+    
+    // 标记所有为已读
+    async function markAllRead() {
+      try {
+        await axios.post(\`/api/alerts/mark-all-read?user_id=\${currentUser.id}\`);
+        await loadAlerts();
+        closeAlertsPanel();
+        showAlertsPanel();
+      } catch (error) {
+        alert('操作失败：' + error.message);
+      }
+    }
+    
+    // 删除提醒
+    async function deleteAlert(alertId) {
+      if (!confirm('确定删除这条提醒吗？')) return;
+      
+      try {
+        await axios.delete(\`/api/alerts/\${alertId}\`);
+        await loadAlerts();
+        closeAlertsPanel();
+        showAlertsPanel();
+      } catch (error) {
+        alert('删除失败：' + error.message);
+      }
+    }
+    
+    // 刷新提醒
+    async function refreshAlerts() {
+      await checkOverdueClients();
+      await loadAlerts();
+      closeAlertsPanel();
+      showAlertsPanel();
+    }
+    
+    // 辅助函数
+    function getPriorityClass(priority) {
+      const classes = {
+        high: 'bg-red-100 text-red-700',
+        medium: 'bg-yellow-100 text-yellow-700',
+        low: 'bg-gray-100 text-gray-700'
+      };
+      return classes[priority] || classes.medium;
+    }
+    
+    function getPriorityText(priority) {
+      const texts = { high: '高优先级', medium: '中优先级', low: '低优先级' };
+      return texts[priority] || '中优先级';
+    }
+    
+    function getAlertTypeIcon(type) {
+      const icons = {
+        interaction_overdue: '<i class="fas fa-clock text-red-600"></i>',
+        high_opportunity: '<i class="fas fa-star text-yellow-600"></i>',
+        high_risk: '<i class="fas fa-exclamation-triangle text-orange-600"></i>',
+        stage_stuck: '<i class="fas fa-pause-circle text-gray-600"></i>'
+      };
+      return icons[type] || '<i class="fas fa-info-circle"></i>';
+    }
+    
+    function getAlertTypeText(type) {
+      const texts = {
+        interaction_overdue: '超期未互动',
+        high_opportunity: '高机会客户',
+        high_risk: '高风险客户',
+        stage_stuck: '阶段停滞'
+      };
+      return texts[type] || '系统提醒';
+    }
+    
+    function formatTime(datetime) {
+      if (!datetime) return '';
+      const date = new Date(datetime);
+      const now = new Date();
+      const diff = (now - date) / 1000; // 秒
+      
+      if (diff < 60) return '刚刚';
+      if (diff < 3600) return \`\${Math.floor(diff / 60)}分钟前\`;
+      if (diff < 86400) return \`\${Math.floor(diff / 3600)}小时前\`;
+      if (diff < 604800) return \`\${Math.floor(diff / 86400)}天前\`;
+      
+      return date.toLocaleDateString('zh-CN');
+    }
+    
+    // 自动检测提醒（每10分钟）
+    setInterval(() => {
+      checkOverdueClients();
+      loadAlerts();
+    }, 10 * 60 * 1000);
+    
+    // 初始化时检测一次
+    setTimeout(() => {
+      checkOverdueClients();
+      loadAlerts();
+    }, 2000);
 
     // 启动应用
     initApp();
