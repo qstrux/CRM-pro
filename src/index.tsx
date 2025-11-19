@@ -40,16 +40,39 @@ app.get('/api/db/status', async (c) => {
 // 客户 API
 // ============================================
 
-// 获取所有客户（按阶段分组）
+// 获取所有客户（按阶段分组，支持搜索和筛选）
 app.get('/api/clients', async (c) => {
   const { DB } = c.env;
-  const userId = c.req.query('user_id') || '2'; // MVP 阶段默认用户
+  const userId = c.req.query('user_id') || '2';
+  const search = c.req.query('search') || '';
+  const stage = c.req.query('stage') || '';
+  const tempLevel = c.req.query('temp_level') || '';
   
-  const clients = await DB.prepare(`
+  let query = `
     SELECT * FROM clients 
     WHERE user_id = ? AND is_archived = 0
-    ORDER BY stage, last_interaction_at DESC
-  `).bind(userId).all();
+  `;
+  const params: any[] = [userId];
+  
+  if (search) {
+    query += ` AND (name LIKE ? OR phone LIKE ? OR wechat LIKE ?)`;
+    const searchPattern = `%${search}%`;
+    params.push(searchPattern, searchPattern, searchPattern);
+  }
+  
+  if (stage) {
+    query += ` AND stage = ?`;
+    params.push(stage);
+  }
+  
+  if (tempLevel) {
+    query += ` AND temperature_level = ?`;
+    params.push(tempLevel);
+  }
+  
+  query += ` ORDER BY stage, last_interaction_at DESC`;
+  
+  const clients = await DB.prepare(query).bind(...params).all();
   
   return c.json({ success: true, clients: clients.results });
 });
@@ -478,10 +501,49 @@ app.get('/', (c) => {
         { key: 'deposited', name: '已入金', icon: 'fa-money-bill-wave', color: 'bg-green-100 text-green-800' }
       ];
 
+      // 计算统计数据
+      const tempStats = {
+        hot: clientsData.filter(c => c.temperature_level === 'hot').length,
+        warm: clientsData.filter(c => c.temperature_level === 'warm').length,
+        neutral: clientsData.filter(c => c.temperature_level === 'neutral').length,
+        cold: clientsData.filter(c => c.temperature_level === 'cold').length
+      };
+
       const html = \`
-        <div class="mb-6">
-          <h2 class="text-2xl font-bold text-gray-900">客户看板</h2>
-          <p class="text-gray-600 mt-2">拖拽客户卡片到不同阶段，或点击查看详情</p>
+        <div class="mb-6 flex items-center justify-between">
+          <div>
+            <h2 class="text-2xl font-bold text-gray-900">客户看板</h2>
+            <p class="text-gray-600 mt-1">
+              共 \${clientsData.length} 位客户 · 
+              <span class="text-red-600">🔥 \${tempStats.hot}</span> · 
+              <span class="text-orange-500">🌤️ \${tempStats.warm}</span> · 
+              <span class="text-blue-500">☁️ \${tempStats.neutral}</span> · 
+              <span class="text-gray-500">❄️ \${tempStats.cold}</span>
+            </p>
+          </div>
+          <div class="flex space-x-3">
+            <div class="relative">
+              <input 
+                type="text" 
+                id="searchInput"
+                placeholder="搜索客户姓名/电话/微信..." 
+                class="pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 w-64"
+                onkeyup="handleSearch(this.value)"
+              >
+              <i class="fas fa-search absolute left-3 top-3 text-gray-400"></i>
+            </div>
+            <select 
+              id="tempFilter" 
+              class="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              onchange="handleFilter()"
+            >
+              <option value="">所有温度</option>
+              <option value="hot">🔥 热 (\${tempStats.hot})</option>
+              <option value="warm">🌤️ 温 (\${tempStats.warm})</option>
+              <option value="neutral">☁️ 中 (\${tempStats.neutral})</option>
+              <option value="cold">❄️ 冷 (\${tempStats.cold})</option>
+            </select>
+          </div>
         </div>
         <div class="flex space-x-4 overflow-x-auto pb-4">
           \${stages.map(stage => {
@@ -936,6 +998,38 @@ app.get('/', (c) => {
       } catch (error) {
         alert('移除失败：' + error.message);
       }
+    }
+
+    // 搜索处理（防抖）
+    let searchTimeout;
+    function handleSearch(keyword) {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(async () => {
+        const tempFilter = document.getElementById('tempFilter').value;
+        const res = await axios.get('/api/clients', {
+          params: {
+            search: keyword,
+            temp_level: tempFilter
+          }
+        });
+        clientsData = res.data.clients;
+        renderKanban();
+      }, 300);
+    }
+
+    // 筛选处理
+    async function handleFilter() {
+      const searchInput = document.getElementById('searchInput').value;
+      const tempFilter = document.getElementById('tempFilter').value;
+      
+      const res = await axios.get('/api/clients', {
+        params: {
+          search: searchInput,
+          temp_level: tempFilter
+        }
+      });
+      clientsData = res.data.clients;
+      renderKanban();
     }
 
     // 显示新增客户模态框
