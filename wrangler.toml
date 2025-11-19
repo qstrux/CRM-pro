@@ -1,10 +1,9 @@
-name = "webapp"
-main = "src/index.tsx"
+name = "crm-high-trust-sales"
 compatibility_date = "2025-11-19"
 pages_build_output_dir = "./dist"
 compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "webapp-production"
-database_id = ""
+database_name = "crm-high-trust-sales-db"
+database_id = "5b81b16a-1936-44b1-a9a7-c12852fe5b48"
