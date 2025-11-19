@@ -1847,6 +1847,183 @@ app.post('/api/risk-opportunity/assess/:clientId', async (c) => {
 });
 
 // ============================================
+// 数据导出功能 API
+// ============================================
+
+// 导出客户数据为 CSV
+app.get('/api/export/clients/csv', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  // 获取所有客户数据（包含标签）
+  const clients = await DB.prepare(`
+    SELECT 
+      c.*,
+      GROUP_CONCAT(t.name, '; ') as tags
+    FROM clients c
+    LEFT JOIN client_tags ct ON c.id = ct.client_id
+    LEFT JOIN tags t ON ct.tag_id = t.id
+    WHERE c.user_id = ? AND c.is_archived = 0
+    GROUP BY c.id
+    ORDER BY c.created_at DESC
+  `).bind(userId).all();
+  
+  // 阶段名称映射
+  const stageNames: { [key: string]: string } = {
+    'new_lead': '新接粉',
+    'initial_contact': '初步破冰',
+    'nurturing': '深度培育',
+    'high_intent': '高意向',
+    'joined_group': '已进群',
+    'opened_account': '已开户',
+    'deposited': '已入金'
+  };
+  
+  const tempNames: { [key: string]: string } = {
+    'hot': '热',
+    'warm': '温',
+    'neutral': '中性',
+    'cold': '冷'
+  };
+  
+  // 生成 CSV 内容
+  const headers = [
+    'ID', '姓名', '电话', '微信', '邮箱', '来源',
+    '当前阶段', '温度评分', '温度等级',
+    '高机会', '高风险', '风险备注',
+    '兴趣点', '性格特征', '稀缺品质', '行为习惯', '投资画像',
+    '标签', '最后互动时间', '创建时间'
+  ];
+  
+  let csv = headers.join(',') + '\n';
+  
+  for (const client of clients.results || []) {
+    const row = [
+      client.id,
+      '"' + (client.name || '') + '"',
+      '"' + (client.phone || '') + '"',
+      '"' + (client.wechat || '') + '"',
+      '"' + (client.email || '') + '"',
+      '"' + (client.source || '') + '"',
+      '"' + (stageNames[client.stage as string] || client.stage) + '"',
+      client.temperature_score || 50,
+      '"' + (tempNames[client.temperature_level as string] || client.temperature_level) + '"',
+      client.is_high_opportunity ? '是' : '否',
+      client.is_high_risk ? '是' : '否',
+      '"' + ((client.risk_notes as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.interests as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.personality as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.unique_qualities as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.behavior_patterns as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.investment_profile as string || '').replace(/"/g, '""')) + '"',
+      '"' + ((client.tags as string || '').replace(/"/g, '""')) + '"',
+      '"' + (client.last_interaction_at || '') + '"',
+      '"' + (client.created_at || '') + '"'
+    ];
+    csv += row.join(',') + '\n';
+  }
+  
+  // 添加 UTF-8 BOM 以支持中文
+  const csvWithBOM = '\ufeff' + csv;
+  
+  return new Response(csvWithBOM, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="crm-clients-${new Date().toISOString().split('T')[0]}.csv"`
+    }
+  });
+});
+
+// 导出客户数据为 JSON（用于 Excel）
+app.get('/api/export/clients/json', async (c) => {
+  const { DB } = c.env;
+  const userId = c.req.query('user_id');
+  
+  if (!userId) {
+    return c.json({ success: false, error: '缺少 user_id 参数' }, 400);
+  }
+  
+  // 获取所有客户数据（包含标签）
+  const clients = await DB.prepare(`
+    SELECT 
+      c.*,
+      GROUP_CONCAT(t.name, '; ') as tags
+    FROM clients c
+    LEFT JOIN client_tags ct ON c.id = ct.client_id
+    LEFT JOIN tags t ON ct.tag_id = t.id
+    WHERE c.user_id = ? AND c.is_archived = 0
+    GROUP BY c.id
+    ORDER BY c.created_at DESC
+  `).bind(userId).all();
+  
+  // 获取每个客户的日志数
+  const clientsWithLogs = [];
+  for (const client of clients.results || []) {
+    const logs = await DB.prepare(`
+      SELECT COUNT(*) as count FROM client_logs WHERE client_id = ?
+    `).bind(client.id).first();
+    
+    clientsWithLogs.push({
+      ...client,
+      total_logs: logs?.count || 0
+    });
+  }
+  
+  const stageNames: { [key: string]: string } = {
+    'new_lead': '新接粉',
+    'initial_contact': '初步破冰',
+    'nurturing': '深度培育',
+    'high_intent': '高意向',
+    'joined_group': '已进群',
+    'opened_account': '已开户',
+    'deposited': '已入金'
+  };
+  
+  const tempNames: { [key: string]: string } = {
+    'hot': '热',
+    'warm': '温',
+    'neutral': '中性',
+    'cold': '冷'
+  };
+  
+  // 格式化数据
+  const formattedClients = clientsWithLogs.map(client => ({
+    ID: client.id,
+    姓名: client.name,
+    电话: client.phone || '',
+    微信: client.wechat || '',
+    邮箱: client.email || '',
+    来源: client.source || '',
+    当前阶段: stageNames[client.stage as string] || client.stage,
+    温度评分: client.temperature_score || 50,
+    温度等级: tempNames[client.temperature_level as string] || client.temperature_level,
+    高机会: client.is_high_opportunity ? '是' : '否',
+    高风险: client.is_high_risk ? '是' : '否',
+    风险备注: client.risk_notes || '',
+    兴趣点: client.interests || '',
+    性格特征: client.personality || '',
+    稀缺品质: client.unique_qualities || '',
+    行为习惯: client.behavior_patterns || '',
+    投资画像: client.investment_profile || '',
+    标签: client.tags || '',
+    互动次数: client.total_logs || 0,
+    最后互动时间: client.last_interaction_at || '',
+    创建时间: client.created_at || ''
+  }));
+  
+  return c.json({
+    success: true,
+    data: formattedClients,
+    total: formattedClients.length,
+    exportDate: new Date().toISOString()
+  });
+});
+
+// ============================================
 // 登录/注册页面
 // ============================================
 app.get('/login', (c) => {
@@ -2482,6 +2659,13 @@ app.get('/', (c) => {
               <option value="neutral">☁️ 中 (\${tempStats.neutral})</option>
               <option value="cold">❄️ 冷 (\${tempStats.cold})</option>
             </select>
+            <button 
+              onclick="showExportModal()" 
+              class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-medium"
+              title="导出客户数据"
+            >
+              <i class="fas fa-download mr-2"></i>导出数据
+            </button>
           </div>
         </div>
         <div class="flex space-x-4 overflow-x-auto pb-4">
@@ -5584,6 +5768,135 @@ app.get('/', (c) => {
         toast.style.opacity = '0';
         setTimeout(() => toast.remove(), 300);
       }, 3000);
+    }
+
+    // ============================================
+    // 数据导出功能
+    // ============================================
+    
+    // 显示导出模态框
+    function showExportModal() {
+      const modal = document.createElement('div');
+      modal.id = 'exportModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-md w-full mx-4">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">
+              <i class="fas fa-download mr-2 text-green-600"></i>
+              导出客户数据
+            </h2>
+            <button onclick="closeExportModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <div class="space-y-4">
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p class="text-sm text-gray-700">
+                <i class="fas fa-info-circle text-blue-600 mr-2"></i>
+                将导出所有非归档客户的完整数据，包括基本信息、温度评分、标签、客户画像等
+              </p>
+            </div>
+            
+            <div class="space-y-3">
+              <button 
+                onclick="exportClientData('csv')" 
+                class="w-full bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 transition font-medium flex items-center justify-center"
+              >
+                <i class="fas fa-file-csv text-2xl mr-3"></i>
+                <div class="text-left">
+                  <div class="font-bold">导出为 CSV 文件</div>
+                  <div class="text-sm opacity-90">适用于 Excel、Google Sheets 等</div>
+                </div>
+              </button>
+              
+              <button 
+                onclick="exportClientData('excel')" 
+                class="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-medium flex items-center justify-center"
+              >
+                <i class="fas fa-file-excel text-2xl mr-3"></i>
+                <div class="text-left">
+                  <div class="font-bold">导出为 Excel 文件</div>
+                  <div class="text-sm opacity-90">JSON 格式，需手动转换</div>
+                </div>
+              </button>
+              
+              <button 
+                onclick="exportClientData('json')" 
+                class="w-full bg-purple-600 text-white py-3 rounded-lg hover:bg-purple-700 transition font-medium flex items-center justify-center"
+              >
+                <i class="fas fa-file-code text-2xl mr-3"></i>
+                <div class="text-left">
+                  <div class="font-bold">导出为 JSON 文件</div>
+                  <div class="text-sm opacity-90">用于数据分析或导入其他系统</div>
+                </div>
+              </button>
+            </div>
+            
+            <div class="text-xs text-gray-500 mt-4">
+              <p>📊 当前客户数：\${clientsData.length}</p>
+              <p>📅 导出时间：\${new Date().toLocaleString('zh-CN')}</p>
+            </div>
+          </div>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+    }
+    
+    // 关闭导出模态框
+    function closeExportModal() {
+      const modal = document.getElementById('exportModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 导出客户数据
+    async function exportClientData(format) {
+      try {
+        if (format === 'csv') {
+          // CSV 导出 - 直接下载
+          const url = \`/api/export/clients/csv?user_id=\${currentUser.id}\`;
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = \`crm-clients-\${new Date().toISOString().split('T')[0]}.csv\`;
+          link.click();
+          
+          closeExportModal();
+          showToast('✅ CSV 文件已开始下载', 'success');
+          
+        } else if (format === 'excel' || format === 'json') {
+          // JSON 导出 - 获取数据后转换
+          const res = await axios.get(\`/api/export/clients/json?user_id=\${currentUser.id}\`);
+          
+          if (res.data.success) {
+            const jsonData = JSON.stringify(res.data.data, null, 2);
+            const blob = new Blob([jsonData], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = \`crm-clients-\${new Date().toISOString().split('T')[0]}.json\`;
+            link.click();
+            URL.revokeObjectURL(url);
+            
+            closeExportModal();
+            showToast(\`✅ JSON 文件已下载（\${res.data.total} 条数据）\`, 'success');
+          } else {
+            alert('导出失败：' + res.data.error);
+          }
+        }
+      } catch (error) {
+        alert('导出失败：' + error.message);
+      }
+    }
+    
+    // 将 JSON 转换为 Excel（使用 SheetJS）
+    function convertJsonToExcel(data) {
+      // 注意：这需要引入 SheetJS 库
+      // 为简化实现，这里先返回 JSON，用户可使用在线工具转换
+      return data;
     }
 
     // 启动应用
