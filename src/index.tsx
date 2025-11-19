@@ -959,6 +959,150 @@ app.get('/api/scripts/stats/summary', async (c) => {
 });
 
 // ============================================
+// 批量导入 API
+// ============================================
+
+// 批量导入客户数据
+app.post('/api/clients/batch-import', async (c) => {
+  const { DB } = c.env;
+  const { clients, userId } = await c.req.json();
+  
+  if (!clients || !Array.isArray(clients)) {
+    return c.json({ success: false, error: '无效的客户数据' }, 400);
+  }
+  
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [] as any[]
+  };
+  
+  // 逐个插入客户数据
+  for (let i = 0; i < clients.length; i++) {
+    const client = clients[i];
+    
+    try {
+      // 验证必填字段
+      if (!client.name) {
+        results.failed++;
+        results.errors.push({ row: i + 1, error: '姓名不能为空', data: client });
+        continue;
+      }
+      
+      // 插入客户数据
+      await DB.prepare(`
+        INSERT INTO clients (
+          user_id, name, phone, wechat, email, source, 
+          stage, temperature_score, temperature_level,
+          interests, personality, unique_qualities, 
+          behavior_patterns, investment_profile
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        userId || 2,
+        client.name,
+        client.phone || null,
+        client.wechat || null,
+        client.email || null,
+        client.source || '导入',
+        client.stage || 'new_lead',
+        client.temperature_score || 50,
+        client.temperature_level || 'neutral',
+        client.interests || null,
+        client.personality || null,
+        client.unique_qualities || null,
+        client.behavior_patterns || null,
+        client.investment_profile || null
+      ).run();
+      
+      results.success++;
+      
+    } catch (error: any) {
+      results.failed++;
+      results.errors.push({ 
+        row: i + 1, 
+        error: error.message || '插入失败', 
+        data: client 
+      });
+    }
+  }
+  
+  return c.json({ 
+    success: true, 
+    results: {
+      total: clients.length,
+      success: results.success,
+      failed: results.failed,
+      errors: results.errors
+    }
+  });
+});
+
+// 解析CSV文本
+app.post('/api/clients/parse-csv', async (c) => {
+  const { csvText } = await c.req.json();
+  
+  if (!csvText) {
+    return c.json({ success: false, error: 'CSV内容不能为空' }, 400);
+  }
+  
+  try {
+    // 简单的CSV解析（支持逗号和制表符分隔）
+    const lines = csvText.trim().split('\n');
+    if (lines.length < 2) {
+      return c.json({ success: false, error: 'CSV至少需要包含表头和一行数据' }, 400);
+    }
+    
+    // 解析表头
+    const headers = lines[0].split(/[,\t]/).map((h: string) => h.trim().replace(/"/g, ''));
+    
+    // 解析数据行
+    const clients = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      const values = line.split(/[,\t]/).map((v: string) => v.trim().replace(/"/g, ''));
+      const client: any = {};
+      
+      headers.forEach((header: string, index: number) => {
+        const value = values[index] || '';
+        // 映射中文表头到英文字段
+        const fieldMap: any = {
+          '姓名': 'name',
+          '电话': 'phone',
+          '微信': 'wechat',
+          '邮箱': 'email',
+          '来源': 'source',
+          '阶段': 'stage',
+          '兴趣点': 'interests',
+          '性格特征': 'personality',
+          '稀缺品质': 'unique_qualities',
+          '行为习惯': 'behavior_patterns',
+          '投资画像': 'investment_profile'
+        };
+        
+        const field = fieldMap[header] || header.toLowerCase();
+        client[field] = value;
+      });
+      
+      clients.push(client);
+    }
+    
+    return c.json({ 
+      success: true, 
+      clients,
+      count: clients.length 
+    });
+    
+  } catch (error: any) {
+    return c.json({ 
+      success: false, 
+      error: 'CSV解析失败: ' + error.message 
+    }, 400);
+  }
+});
+
+// ============================================
 // Dashboard API
 // ============================================
 app.get('/api/dashboard', async (c) => {
@@ -1263,6 +1407,9 @@ app.get('/', (c) => {
           </button>
           <button onclick="showNewClientModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
             <i class="fas fa-plus mr-2"></i>新增客户
+          </button>
+          <button onclick="showImportModal()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
+            <i class="fas fa-file-import mr-2"></i>导入数据
           </button>
           
           <!-- 用户信息 -->
@@ -3239,6 +3386,487 @@ app.get('/', (c) => {
         await renderScriptsLibrary();
       } catch (error) {
         alert('删除失败：' + error.message);
+      }
+    }
+
+    // ============================================
+    // 批量导入功能
+    // ============================================
+    
+    // 显示导入模态框
+    function showImportModal() {
+      const modal = document.createElement('div');
+      modal.id = 'importModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">
+              <i class="fas fa-file-import mr-2 text-green-600"></i>
+              批量导入客户数据
+            </h2>
+            <button onclick="closeImportModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <!-- 导入方式选择 -->
+          <div class="mb-6">
+            <div class="flex space-x-4 mb-4">
+              <button 
+                id="csvTabBtn"
+                onclick="showImportTab('csv')" 
+                class="flex-1 px-4 py-3 border-b-2 border-blue-600 text-blue-600 font-medium"
+              >
+                <i class="fas fa-file-csv mr-2"></i>CSV文件导入
+              </button>
+              <button 
+                id="pasteTabBtn"
+                onclick="showImportTab('paste')" 
+                class="flex-1 px-4 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium"
+              >
+                <i class="fas fa-table mr-2"></i>Excel粘贴导入
+              </button>
+              <button 
+                id="quickTabBtn"
+                onclick="showImportTab('quick')" 
+                class="flex-1 px-4 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium"
+              >
+                <i class="fas fa-bolt mr-2"></i>快速批量录入
+              </button>
+            </div>
+          </div>
+          
+          <!-- CSV导入标签页 -->
+          <div id="csvTab" class="import-tab">
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+              <h3 class="font-semibold text-blue-900 mb-2">
+                <i class="fas fa-info-circle mr-2"></i>CSV格式说明
+              </h3>
+              <p class="text-sm text-blue-800 mb-2">CSV文件第一行必须包含表头，支持以下字段：</p>
+              <div class="text-sm text-blue-700 space-y-1">
+                <p><strong>必填：</strong>姓名</p>
+                <p><strong>可选：</strong>电话、微信、邮箱、来源、阶段、兴趣点、性格特征、稀缺品质、行为习惯、投资画像</p>
+              </div>
+              <button 
+                onclick="downloadTemplate()" 
+                class="mt-3 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+              >
+                <i class="fas fa-download mr-2"></i>下载CSV模板
+              </button>
+            </div>
+            
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                选择CSV文件或直接粘贴CSV内容
+              </label>
+              <input 
+                type="file" 
+                id="csvFileInput"
+                accept=".csv,.txt"
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 mb-3"
+                onchange="handleFileSelect(event)"
+              >
+              <textarea 
+                id="csvTextInput"
+                rows="10" 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                placeholder="或者直接粘贴CSV内容（每行一个客户，用逗号或制表符分隔）"
+              ></textarea>
+            </div>
+            
+            <div class="flex space-x-3">
+              <button 
+                onclick="parseAndPreviewCSV()" 
+                class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-medium"
+              >
+                <i class="fas fa-eye mr-2"></i>预览数据
+              </button>
+              <button 
+                onclick="closeImportModal()" 
+                class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+          
+          <!-- Excel粘贴导入标签页 -->
+          <div id="pasteTab" class="import-tab hidden">
+            <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+              <h3 class="font-semibold text-green-900 mb-2">
+                <i class="fas fa-info-circle mr-2"></i>Excel粘贴导入说明
+              </h3>
+              <p class="text-sm text-green-800">
+                1. 在Excel中选择要导入的客户数据（包含表头）<br>
+                2. 复制（Ctrl+C）<br>
+                3. 粘贴到下方文本框（Ctrl+V）<br>
+                4. 点击"解析数据"按钮
+              </p>
+            </div>
+            
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                从Excel粘贴数据
+              </label>
+              <textarea 
+                id="excelPasteInput"
+                rows="12" 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                placeholder="从Excel复制后在此粘贴（包含表头行）"
+              ></textarea>
+            </div>
+            
+            <div class="flex space-x-3">
+              <button 
+                onclick="parseAndPreviewExcel()" 
+                class="flex-1 bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-medium"
+              >
+                <i class="fas fa-magic mr-2"></i>解析数据
+              </button>
+              <button 
+                onclick="closeImportModal()" 
+                class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+          
+          <!-- 快速批量录入标签页 -->
+          <div id="quickTab" class="import-tab hidden">
+            <div class="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+              <h3 class="font-semibold text-purple-900 mb-2">
+                <i class="fas fa-info-circle mr-2"></i>快速批量录入说明
+              </h3>
+              <p class="text-sm text-purple-800">
+                适合快速录入多个客户的基本信息，每行一个客户。<br>
+                格式：姓名, 电话, 微信, 来源（用逗号分隔）
+              </p>
+            </div>
+            
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                批量快速录入（每行一个客户）
+              </label>
+              <textarea 
+                id="quickInput"
+                rows="12" 
+                class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                placeholder="示例：
+张三, 13800138000, wechat123, LinkedIn
+李四, 13900139000, wechat456, 朋友推荐
+王五, 13700137000, wechat789, Facebook"
+              ></textarea>
+            </div>
+            
+            <div class="flex space-x-3">
+              <button 
+                onclick="parseAndPreviewQuick()" 
+                class="flex-1 bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 font-medium"
+              >
+                <i class="fas fa-rocket mr-2"></i>解析并导入
+              </button>
+              <button 
+                onclick="closeImportModal()" 
+                class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+    }
+    
+    // 关闭导入模态框
+    function closeImportModal() {
+      const modal = document.getElementById('importModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 切换导入标签页
+    function showImportTab(tab) {
+      // 隐藏所有标签页
+      document.querySelectorAll('.import-tab').forEach(el => el.classList.add('hidden'));
+      
+      // 重置所有按钮样式
+      ['csvTabBtn', 'pasteTabBtn', 'quickTabBtn'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+          btn.classList.remove('border-blue-600', 'text-blue-600');
+          btn.classList.add('border-transparent', 'text-gray-600');
+        }
+      });
+      
+      // 显示选中的标签页
+      const targetTab = document.getElementById(tab + 'Tab');
+      const targetBtn = document.getElementById(tab + 'TabBtn');
+      if (targetTab) targetTab.classList.remove('hidden');
+      if (targetBtn) {
+        targetBtn.classList.remove('border-transparent', 'text-gray-600');
+        targetBtn.classList.add('border-blue-600', 'text-blue-600');
+      }
+    }
+    
+    // 下载CSV模板
+    function downloadTemplate() {
+      const template = '姓名,电话,微信,邮箱,来源,阶段,兴趣点,性格特征,稀缺品质,行为习惯,投资画像\\n' +
+                       '张三,13800138000,wechat123,zhang@example.com,LinkedIn,new_lead,数字货币,理性谨慎,决策果断,喜欢晚上联系,风险偏好高\\n' +
+                       '李四,13900139000,wechat456,li@example.com,朋友推荐,initial_contact,股票投资,开朗外向,高净值,回复及时,追求稳健';
+      
+      const blob = new Blob([template], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'clients_template.csv';
+      link.click();
+    }
+    
+    // 处理文件选择
+    function handleFileSelect(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        document.getElementById('csvTextInput').value = e.target.result;
+      };
+      reader.readAsText(file);
+    }
+    
+    // 解析并预览CSV
+    async function parseAndPreviewCSV() {
+      const csvText = document.getElementById('csvTextInput').value.trim();
+      
+      if (!csvText) {
+        alert('请输入或上传CSV内容');
+        return;
+      }
+      
+      try {
+        const res = await axios.post('/api/clients/parse-csv', { csvText });
+        
+        if (res.data.success) {
+          showPreviewModal(res.data.clients);
+        } else {
+          alert('解析失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('解析失败：' + error.message);
+      }
+    }
+    
+    // 解析并预览Excel粘贴数据
+    async function parseAndPreviewExcel() {
+      const excelText = document.getElementById('excelPasteInput').value.trim();
+      
+      if (!excelText) {
+        alert('请粘贴Excel数据');
+        return;
+      }
+      
+      // Excel粘贴的数据通常是制表符分隔的
+      try {
+        const res = await axios.post('/api/clients/parse-csv', { csvText: excelText });
+        
+        if (res.data.success) {
+          showPreviewModal(res.data.clients);
+        } else {
+          alert('解析失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('解析失败：' + error.message);
+      }
+    }
+    
+    // 解析并预览快速录入
+    async function parseAndPreviewQuick() {
+      const quickText = document.getElementById('quickInput').value.trim();
+      
+      if (!quickText) {
+        alert('请输入客户数据');
+        return;
+      }
+      
+      // 解析简单格式：姓名, 电话, 微信, 来源
+      const lines = quickText.split('\\n');
+      const clients = [];
+      
+      for (const line of lines) {
+        const parts = line.split(',').map(p => p.trim());
+        if (parts[0]) {
+          clients.push({
+            name: parts[0],
+            phone: parts[1] || '',
+            wechat: parts[2] || '',
+            source: parts[3] || '其他'
+          });
+        }
+      }
+      
+      if (clients.length === 0) {
+        alert('没有解析到有效数据');
+        return;
+      }
+      
+      showPreviewModal(clients);
+    }
+    
+    // 显示预览模态框
+    function showPreviewModal(clients) {
+      closeImportModal();
+      
+      const modal = document.createElement('div');
+      modal.id = 'previewModal';
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+      modal.innerHTML = \`
+        <div class="bg-white rounded-lg p-8 max-w-6xl w-full max-h-[90vh] overflow-y-auto">
+          <div class="flex items-center justify-between mb-6">
+            <div>
+              <h2 class="text-2xl font-bold text-gray-900">
+                <i class="fas fa-eye mr-2 text-blue-600"></i>
+                数据预览
+              </h2>
+              <p class="text-gray-600 mt-1">共 \${clients.length} 条数据</p>
+            </div>
+            <button onclick="closePreviewModal()" class="text-gray-500 hover:text-gray-700">
+              <i class="fas fa-times text-2xl"></i>
+            </button>
+          </div>
+          
+          <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+            <p class="text-sm text-yellow-800">
+              <i class="fas fa-exclamation-triangle mr-2"></i>
+              请仔细检查数据，确认无误后点击"确认导入"按钮
+            </p>
+          </div>
+          
+          <div class="overflow-x-auto mb-6">
+            <table class="w-full border-collapse">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">序号</th>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">姓名</th>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">电话</th>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">微信</th>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">来源</th>
+                  <th class="px-4 py-2 text-left text-sm font-semibold text-gray-700 border">阶段</th>
+                </tr>
+              </thead>
+              <tbody>
+                \${clients.slice(0, 50).map((client, index) => \`
+                  <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-2 text-sm border">\${index + 1}</td>
+                    <td class="px-4 py-2 text-sm border font-medium">\${client.name || '-'}</td>
+                    <td class="px-4 py-2 text-sm border">\${client.phone || '-'}</td>
+                    <td class="px-4 py-2 text-sm border">\${client.wechat || '-'}</td>
+                    <td class="px-4 py-2 text-sm border">\${client.source || '-'}</td>
+                    <td class="px-4 py-2 text-sm border">\${client.stage || 'new_lead'}</td>
+                  </tr>
+                \`).join('')}
+                \${clients.length > 50 ? \`
+                  <tr>
+                    <td colspan="6" class="px-4 py-2 text-center text-sm text-gray-500 border">
+                      ... 还有 \${clients.length - 50} 条数据
+                    </td>
+                  </tr>
+                \` : ''}
+              </tbody>
+            </table>
+          </div>
+          
+          <div id="importProgress" class="hidden mb-4">
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium text-blue-900">正在导入...</span>
+                <span id="progressText" class="text-sm text-blue-700">0%</span>
+              </div>
+              <div class="w-full bg-blue-200 rounded-full h-2">
+                <div id="progressBar" class="bg-blue-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="flex space-x-3">
+            <button 
+              id="confirmImportBtn"
+              onclick="confirmImport(\${JSON.stringify(clients).replace(/"/g, '&quot;')})" 
+              class="flex-1 bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-medium"
+            >
+              <i class="fas fa-check mr-2"></i>确认导入 (\${clients.length} 条)
+            </button>
+            <button 
+              onclick="closePreviewModal(); showImportModal();" 
+              class="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+            >
+              返回修改
+            </button>
+          </div>
+        </div>
+      \`;
+      
+      document.body.appendChild(modal);
+    }
+    
+    // 关闭预览模态框
+    function closePreviewModal() {
+      const modal = document.getElementById('previewModal');
+      if (modal) {
+        modal.remove();
+      }
+    }
+    
+    // 确认导入
+    async function confirmImport(clients) {
+      const progressDiv = document.getElementById('importProgress');
+      const progressBar = document.getElementById('progressBar');
+      const progressText = document.getElementById('progressText');
+      const confirmBtn = document.getElementById('confirmImportBtn');
+      
+      if (progressDiv) progressDiv.classList.remove('hidden');
+      if (confirmBtn) confirmBtn.disabled = true;
+      
+      try {
+        const res = await axios.post('/api/clients/batch-import', {
+          clients: clients,
+          userId: currentUser.id
+        });
+        
+        if (progressBar) progressBar.style.width = '100%';
+        if (progressText) progressText.textContent = '100%';
+        
+        if (res.data.success) {
+          const results = res.data.results;
+          
+          let message = \`导入完成！\\n\\n\`;
+          message += \`总数：\${results.total}\\n\`;
+          message += \`成功：\${results.success}\\n\`;
+          message += \`失败：\${results.failed}\\n\`;
+          
+          if (results.errors.length > 0) {
+            message += \`\\n失败详情：\\n\`;
+            results.errors.slice(0, 5).forEach(err => {
+              message += \`第\${err.row}行: \${err.error}\\n\`;
+            });
+            if (results.errors.length > 5) {
+              message += \`... 还有 \${results.errors.length - 5} 个错误\`;
+            }
+          }
+          
+          alert(message);
+          closePreviewModal();
+          await showView('kanban');
+        } else {
+          alert('导入失败：' + res.data.error);
+        }
+      } catch (error) {
+        alert('导入失败：' + error.message);
+      } finally {
+        if (confirmBtn) confirmBtn.disabled = false;
       }
     }
 
