@@ -1,0 +1,4 @@
+name,phone,wechat,email,source,stage,temperature_score,temperature_level,interests,personality,unique_qualities,behavior_patterns,investment_profile
+王先生,13800138001,wangxs,wang@example.com,LinkedIn,high_intent,75,warm,"数字货币,股票投资",理性、谨慎、追求稳健收益,决策果断,晚上活跃,风险偏好中等
+刘女士,13800138002,liuns,liu@example.com,朋友推荐,nurturing,60,neutral,"财富管理,资产配置",果断、高净值、投资经验丰富,执行力强,工作日白天联系,追求稳健增值
+张总,13800138003,zhangz,zhang@example.com,Facebook,new_lead,45,neutral,创业投资,创业者、风险偏好高,商业嗅觉敏锐,随时在线,高风险高收益
