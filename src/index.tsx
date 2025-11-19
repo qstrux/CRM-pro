@@ -1103,6 +1103,114 @@ app.post('/api/clients/parse-csv', async (c) => {
 });
 
 // ============================================
+// 团队管理 API
+// ============================================
+
+// 获取团队成员列表
+app.get('/api/team/members', async (c) => {
+  const { DB } = c.env;
+  
+  const members = await DB.prepare(`
+    SELECT 
+      u.id, u.name, u.email, u.role, u.created_at,
+      COUNT(DISTINCT c.id) as total_clients,
+      COUNT(DISTINCT CASE WHEN c.stage = 'deposited' THEN c.id END) as deposited_clients,
+      COUNT(DISTINCT l.id) as total_interactions
+    FROM users u
+    LEFT JOIN clients c ON u.id = c.user_id AND c.is_archived = 0
+    LEFT JOIN client_logs l ON u.id = l.user_id
+    WHERE u.role IN ('sales', 'team_lead')
+    GROUP BY u.id
+    ORDER BY deposited_clients DESC, total_clients DESC
+  `).all();
+  
+  return c.json({ success: true, members: members.results });
+});
+
+// 获取成员KPI详情
+app.get('/api/team/members/:id/kpi', async (c) => {
+  const { DB } = c.env;
+  const memberId = c.req.param('id');
+  const days = c.req.query('days') || '30';
+  
+  const startDate = new Date(Date.now() - parseInt(days) * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
+  
+  // 基础KPI
+  const basicKPI = await DB.prepare(`
+    SELECT 
+      COUNT(DISTINCT c.id) as total_clients,
+      COUNT(DISTINCT CASE WHEN c.stage = 'new_lead' THEN c.id END) as new_leads,
+      COUNT(DISTINCT CASE WHEN c.stage = 'high_intent' THEN c.id END) as high_intents,
+      COUNT(DISTINCT CASE WHEN c.stage = 'deposited' THEN c.id END) as deposited,
+      COUNT(DISTINCT l.id) as total_interactions,
+      COUNT(DISTINCT CASE WHEN DATE(c.created_at) >= ? THEN c.id END) as new_clients_period
+    FROM clients c
+    LEFT JOIN client_logs l ON c.id = l.client_id
+    WHERE c.user_id = ? AND c.is_archived = 0
+  `).bind(startDate, memberId).first();
+  
+  // 每日战报汇总
+  const reportsKPI = await DB.prepare(`
+    SELECT 
+      COUNT(*) as total_reports,
+      SUM(new_leads) as sum_new_leads,
+      SUM(conversions) as sum_conversions,
+      SUM(deposited) as sum_deposited,
+      AVG(total_interactions) as avg_daily_interactions
+    FROM daily_reports
+    WHERE user_id = ? AND report_date >= ?
+  `).bind(memberId, startDate).first();
+  
+  // 话术使用情况
+  const scriptsKPI = await DB.prepare(`
+    SELECT COUNT(*) as total_scripts
+    FROM scripts
+    WHERE user_id = ?
+  `).bind(memberId).first();
+  
+  return c.json({
+    success: true,
+    kpi: {
+      ...basicKPI,
+      ...reportsKPI,
+      ...scriptsKPI
+    }
+  });
+});
+
+// 获取团队排行榜
+app.get('/api/team/leaderboard', async (c) => {
+  const { DB } = c.env;
+  const period = c.req.query('period') || 'month'; // week, month, quarter
+  
+  let days = 30;
+  if (period === 'week') days = 7;
+  if (period === 'quarter') days = 90;
+  
+  const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
+  
+  const leaderboard = await DB.prepare(`
+    SELECT 
+      u.id, u.name,
+      COUNT(DISTINCT r.id) as report_days,
+      SUM(r.new_leads) as total_new_leads,
+      SUM(r.conversions) as total_conversions,
+      SUM(r.deposited) as total_deposited,
+      SUM(r.total_interactions) as total_interactions,
+      CAST(SUM(r.deposited) AS FLOAT) / NULLIF(SUM(r.new_leads), 0) * 100 as conversion_rate
+    FROM users u
+    LEFT JOIN daily_reports r ON u.id = r.user_id AND r.report_date >= ?
+    WHERE u.role IN ('sales', 'team_lead')
+    GROUP BY u.id
+    ORDER BY total_deposited DESC, total_conversions DESC
+  `).bind(startDate).all();
+  
+  return c.json({ success: true, leaderboard: leaderboard.results, period, days });
+});
+
+// ============================================
 // Dashboard API
 // ============================================
 app.get('/api/dashboard', async (c) => {
@@ -1402,6 +1510,9 @@ app.get('/', (c) => {
           <button onclick="showView('scripts')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-book mr-2"></i>话术智库
           </button>
+          <button onclick="showView('team')" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
+            <i class="fas fa-users mr-2"></i>团队管理
+          </button>
           <button onclick="showTagsManagement()" class="px-4 py-2 text-gray-700 hover:text-blue-600 transition">
             <i class="fas fa-tags mr-2"></i>标签管理
           </button>
@@ -1631,6 +1742,9 @@ app.get('/', (c) => {
       } else if (view === 'scripts') {
         content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
         await renderScriptsLibrary();
+      } else if (view === 'team') {
+        content.innerHTML = '<div class="text-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i></div>';
+        await renderTeamManagement();
       }
     }
 
@@ -3867,6 +3981,302 @@ app.get('/', (c) => {
         alert('导入失败：' + error.message);
       } finally {
         if (confirmBtn) confirmBtn.disabled = false;
+      }
+    }
+
+    // ============================================
+    // 团队管理功能
+    // ============================================
+    
+    let teamData = [];
+    let leaderboardData = [];
+    
+    // 渲染团队管理页面
+    async function renderTeamManagement() {
+      const content = document.getElementById('mainContent');
+      
+      try {
+        // 获取团队成员
+        const membersRes = await axios.get('/api/team/members');
+        teamData = membersRes.data.members;
+        
+        // 获取排行榜数据（默认本月）
+        const leaderboardRes = await axios.get('/api/team/leaderboard?period=month');
+        leaderboardData = leaderboardRes.data.leaderboard;
+        
+        const html = \`
+          <div class="mb-6">
+            <h2 class="text-2xl font-bold text-gray-900">团队管理</h2>
+            <p class="text-gray-600 mt-1">团队成员业绩概览与KPI对比</p>
+          </div>
+          
+          <!-- 排行榜 -->
+          <div class="bg-gradient-to-r from-yellow-400 via-yellow-500 to-yellow-600 rounded-lg shadow-lg p-6 mb-8 text-white">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-xl font-bold">
+                <i class="fas fa-trophy mr-2"></i>本月业绩排行榜
+              </h3>
+              <div class="flex space-x-2">
+                <button onclick="updateLeaderboard('week')" class="px-3 py-1 bg-white bg-opacity-20 rounded hover:bg-opacity-30 text-sm">
+                  本周
+                </button>
+                <button onclick="updateLeaderboard('month')" class="px-3 py-1 bg-white bg-opacity-40 rounded text-sm">
+                  本月
+                </button>
+                <button onclick="updateLeaderboard('quarter')" class="px-3 py-1 bg-white bg-opacity-20 rounded hover:bg-opacity-30 text-sm">
+                  本季度
+                </button>
+              </div>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              \${leaderboardData.slice(0, 3).map((member, index) => {
+                const medals = ['🥇', '🥈', '🥉'];
+                const colors = ['from-yellow-300', 'from-gray-300', 'from-orange-300'];
+                return \`
+                  <div class="bg-gradient-to-br \${colors[index]} to-transparent rounded-lg p-4 text-gray-900">
+                    <div class="flex items-center space-x-3 mb-3">
+                      <span class="text-4xl">\${medals[index]}</span>
+                      <div>
+                        <p class="font-bold text-lg">\${member.name}</p>
+                        <p class="text-sm opacity-80">第\${index + 1}名</p>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                      <div>
+                        <p class="opacity-70">入金客户</p>
+                        <p class="font-bold text-lg">\${member.total_deposited || 0}</p>
+                      </div>
+                      <div>
+                        <p class="opacity-70">总转化</p>
+                        <p class="font-bold text-lg">\${member.total_conversions || 0}</p>
+                      </div>
+                      <div>
+                        <p class="opacity-70">新客户</p>
+                        <p class="font-bold">\${member.total_new_leads || 0}</p>
+                      </div>
+                      <div>
+                        <p class="opacity-70">互动次数</p>
+                        <p class="font-bold">\${member.total_interactions || 0}</p>
+                      </div>
+                    </div>
+                  </div>
+                \`;
+              }).join('')}
+            </div>
+            
+            \${leaderboardData.length > 3 ? \`
+              <div class="mt-4 bg-white bg-opacity-10 rounded-lg p-3">
+                <div class="grid grid-cols-1 gap-2 text-sm">
+                  \${leaderboardData.slice(3).map((member, index) => \`
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center space-x-3">
+                        <span class="font-bold text-lg w-6">\${index + 4}</span>
+                        <span class="font-medium">\${member.name}</span>
+                      </div>
+                      <div class="flex space-x-4 text-xs">
+                        <span>入金: \${member.total_deposited || 0}</span>
+                        <span>转化: \${member.total_conversions || 0}</span>
+                        <span>新客: \${member.total_new_leads || 0}</span>
+                      </div>
+                    </div>
+                  \`).join('')}
+                </div>
+              </div>
+            \` : ''}
+          </div>
+          
+          <!-- 成员列表 -->
+          <div class="bg-white rounded-lg shadow-sm p-6">
+            <h3 class="text-xl font-bold text-gray-900 mb-4">
+              <i class="fas fa-users mr-2"></i>团队成员列表
+            </h3>
+            
+            <div class="overflow-x-auto">
+              <table class="w-full">
+                <thead class="bg-gray-50">
+                  <tr>
+                    <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">成员</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold text-gray-700">角色</th>
+                    <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">客户总数</th>
+                    <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">已入金</th>
+                    <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">互动次数</th>
+                    <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">加入时间</th>
+                    <th class="px-4 py-3 text-center text-sm font-semibold text-gray-700">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200">
+                  \${teamData.map(member => \`
+                    <tr class="hover:bg-gray-50">
+                      <td class="px-4 py-3">
+                        <div class="flex items-center space-x-3">
+                          <div class="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                            <i class="fas fa-user text-blue-600"></i>
+                          </div>
+                          <div>
+                            <p class="font-medium text-gray-900">\${member.name}</p>
+                            <p class="text-sm text-gray-500">\${member.email}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <span class="px-2 py-1 rounded-full text-xs font-medium \${
+                          member.role === 'team_lead' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                        }">
+                          \${member.role === 'team_lead' ? '团队主管' : '销售'}
+                        </span>
+                      </td>
+                      <td class="px-4 py-3 text-center font-medium text-gray-900">\${member.total_clients || 0}</td>
+                      <td class="px-4 py-3 text-center">
+                        <span class="font-bold text-green-600">\${member.deposited_clients || 0}</span>
+                      </td>
+                      <td class="px-4 py-3 text-center text-gray-700">\${member.total_interactions || 0}</td>
+                      <td class="px-4 py-3 text-center text-sm text-gray-500">
+                        \${new Date(member.created_at).toLocaleDateString()}
+                      </td>
+                      <td class="px-4 py-3 text-center">
+                        <button 
+                          onclick="viewMemberKPI(\${member.id}, '\${member.name}')" 
+                          class="text-blue-600 hover:text-blue-800"
+                          title="查看详细KPI"
+                        >
+                          <i class="fas fa-chart-line"></i>
+                        </button>
+                      </td>
+                    </tr>
+                  \`).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        \`;
+        
+        content.innerHTML = html;
+        
+      } catch (error) {
+        console.error('加载团队数据失败:', error);
+        content.innerHTML = '<div class="text-center py-20 text-red-600">加载失败</div>';
+      }
+    }
+    
+    // 更新排行榜数据
+    async function updateLeaderboard(period) {
+      try {
+        const res = await axios.get(\`/api/team/leaderboard?period=\${period}\`);
+        leaderboardData = res.data.leaderboard;
+        await renderTeamManagement();
+      } catch (error) {
+        alert('更新失败：' + error.message);
+      }
+    }
+    
+    // 查看成员KPI详情
+    async function viewMemberKPI(memberId, memberName) {
+      try {
+        const res = await axios.get(\`/api/team/members/\${memberId}/kpi?days=30\`);
+        const kpi = res.data.kpi;
+        
+        const modal = document.createElement('div');
+        modal.id = 'memberKPIModal';
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = \`
+          <div class="bg-white rounded-lg p-8 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+              <h2 class="text-2xl font-bold text-gray-900">
+                <i class="fas fa-chart-bar mr-2 text-blue-600"></i>
+                \${memberName} - KPI详情（最近30天）
+              </h2>
+              <button onclick="closeMemberKPIModal()" class="text-gray-500 hover:text-gray-700">
+                <i class="fas fa-times text-2xl"></i>
+              </button>
+            </div>
+            
+            <!-- KPI卡片 -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <div class="bg-blue-50 rounded-lg p-4">
+                <p class="text-sm text-blue-600 mb-1">客户总数</p>
+                <p class="text-3xl font-bold text-blue-900">\${kpi.total_clients || 0}</p>
+              </div>
+              <div class="bg-green-50 rounded-lg p-4">
+                <p class="text-sm text-green-600 mb-1">已入金</p>
+                <p class="text-3xl font-bold text-green-900">\${kpi.deposited || 0}</p>
+              </div>
+              <div class="bg-purple-50 rounded-lg p-4">
+                <p class="text-sm text-purple-600 mb-1">高意向客户</p>
+                <p class="text-3xl font-bold text-purple-900">\${kpi.high_intents || 0}</p>
+              </div>
+              <div class="bg-orange-50 rounded-lg p-4">
+                <p class="text-sm text-orange-600 mb-1">新客户</p>
+                <p class="text-3xl font-bold text-orange-900">\${kpi.new_clients_period || 0}</p>
+              </div>
+            </div>
+            
+            <!-- 互动数据 -->
+            <div class="bg-gray-50 rounded-lg p-6 mb-6">
+              <h3 class="font-bold text-gray-900 mb-4">互动数据</h3>
+              <div class="grid grid-cols-2 gap-4">
+                <div>
+                  <p class="text-sm text-gray-600">总互动次数</p>
+                  <p class="text-2xl font-bold text-blue-600">\${kpi.total_interactions || 0}</p>
+                </div>
+                <div>
+                  <p class="text-sm text-gray-600">日均互动次数</p>
+                  <p class="text-2xl font-bold text-blue-600">\${(kpi.avg_daily_interactions || 0).toFixed(1)}</p>
+                </div>
+              </div>
+            </div>
+            
+            <!-- 战报数据 -->
+            <div class="bg-gray-50 rounded-lg p-6 mb-6">
+              <h3 class="font-bold text-gray-900 mb-4">战报统计</h3>
+              <div class="grid grid-cols-3 gap-4">
+                <div>
+                  <p class="text-sm text-gray-600">提交天数</p>
+                  <p class="text-2xl font-bold text-green-600">\${kpi.total_reports || 0}</p>
+                </div>
+                <div>
+                  <p class="text-sm text-gray-600">累计新客</p>
+                  <p class="text-2xl font-bold text-purple-600">\${kpi.sum_new_leads || 0}</p>
+                </div>
+                <div>
+                  <p class="text-sm text-gray-600">累计转化</p>
+                  <p class="text-2xl font-bold text-orange-600">\${kpi.sum_conversions || 0}</p>
+                </div>
+              </div>
+            </div>
+            
+            <!-- 话术数据 -->
+            <div class="bg-gray-50 rounded-lg p-6">
+              <h3 class="font-bold text-gray-900 mb-4">话术智库</h3>
+              <div>
+                <p class="text-sm text-gray-600">创建话术数</p>
+                <p class="text-2xl font-bold text-blue-600">\${kpi.total_scripts || 0}</p>
+              </div>
+            </div>
+            
+            <div class="mt-6">
+              <button 
+                onclick="closeMemberKPIModal()" 
+                class="w-full bg-gray-300 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-400"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        \`;
+        
+        document.body.appendChild(modal);
+        
+      } catch (error) {
+        alert('加载KPI失败：' + error.message);
+      }
+    }
+    
+    // 关闭成员KPI模态框
+    function closeMemberKPIModal() {
+      const modal = document.getElementById('memberKPIModal');
+      if (modal) {
+        modal.remove();
       }
     }
 
